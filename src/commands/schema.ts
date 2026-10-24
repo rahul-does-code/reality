@@ -84,3 +84,27 @@ export function validateCommand(v: unknown): Command | string {
     intensity: c.intensity as number | null,
   };
 }
+
+// ---- Image-edit proxy contract (POST /api/edit), used by remove/replace ----
+
+export interface EditRequest {
+  /** Clean frame, JPEG base64 (no data: prefix), long side <= 1024px. */
+  image: string;
+  /** Same frame with the target tinted + outlined in magenta, JPEG base64. Gemini has no mask input. */
+  highlight: string;
+  /** What to do inside the highlighted region. */
+  prompt: string;
+  width: number;
+  height: number;
+  /** Per-request Meta latency settings (for scripts/test-edit.mjs); unset keys use .env. */
+  meta?: Partial<MetaSpeedOptions>;
+}
+
+export interface MetaSpeedOptions {
+  reasoning_strength: "low" | "high";
+  enable_web_search: boolean;
+  enable_image_search: boolean;
+  enable_shell: boolean;
+}
+
+export type EditResponse = { image: string; mime: string; ms: number } | { error: string };

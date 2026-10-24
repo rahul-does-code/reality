@@ -9,7 +9,8 @@
     "preview": "vite preview --host",
     "server": "tsx watch server/proxy.ts",
     "dev:all": "concurrently -k -n web,api -c magenta,cyan \"npm:dev\" \"npm:server\"",
-    "test:commands": "node scripts/test-commands.mjs"
+    "test:commands": "node scripts/test-commands.mjs",
+    "test:edit": "node scripts/test-edit.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",

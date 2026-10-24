@@ -1,4 +1,4 @@
-// Tiny API proxy so GEMINI_API_KEY stays server-side. Vite proxies /api/* here in dev.
+// Tiny API proxy so API keys (GEMINI_API_KEY, META_API_KEY) stay server-side. Vite proxies /api/* here in dev.
 // Run: npx tsx server/proxy.ts   (or `npm run dev:all` for this + Vite)
 import "dotenv/config";
 import express from "express";
@@ -8,6 +8,9 @@ import {
   validateCommand,
   type CommandRequest,
   type CommandResponse,
+  type EditRequest,
+  type EditResponse,
+  type MetaSpeedOptions,
 } from "../src/commands/schema";
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
@@ -17,9 +20,32 @@ const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
 const THINKING = process.env.GEMINI_THINKING ?? "minimal";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
+// Image edits (remove/replace): IMAGE_PROVIDER=meta (default, Muse Image) or gemini.
+const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER === "gemini" ? "gemini" : "meta";
+// Docs' recommended image-edit model; gemini-3.1-flash-lite-image is the faster/cheaper option.
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL ?? "gemini-nano-banana-2.1";
+const META_API_KEY = process.env.META_API_KEY;
+const META_URL = "https://api.meta.ai/v1/images/edits";
+const META_IMAGE_MODEL = process.env.META_IMAGE_MODEL ?? "muse-image-1.0";
+// Latency settings (see the Images schemas docs). Defaults are the fastest the API accepts:
+// reasoning "low" = one generation pass, no self-refinement; tools off = no search/shell detours.
+const envBool = (v: string | undefined, fallback: boolean) => (v === undefined ? fallback : v === "true");
+const META_DEFAULTS: MetaSpeedOptions = {
+  reasoning_strength: process.env.META_REASONING === "high" ? "high" : "low",
+  enable_web_search: envBool(process.env.META_WEB_SEARCH, false),
+  enable_image_search: envBool(process.env.META_IMAGE_SEARCH, false),
+  enable_shell: envBool(process.env.META_SHELL, false),
+};
+const IMAGE_MODEL = IMAGE_PROVIDER === "meta" ? META_IMAGE_MODEL : GEMINI_IMAGE_MODEL;
+const EDIT_TIMEOUT_MS = IMAGE_PROVIDER === "meta" ? 45_000 : 25_000;
+const ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
+
 if (!API_KEY) {
   console.error("GEMINI_API_KEY missing: add it to .env");
   process.exit(1);
+}
+if (IMAGE_PROVIDER === "meta" && !META_API_KEY) {
+  console.warn("META_API_KEY missing: /api/edit will fail until it's in .env (or set IMAGE_PROVIDER=gemini)");
 }
 
 const SYSTEM_PROMPT = `You turn one spoken photo-editing command into JSON for a live camera editor.
@@ -41,13 +67,14 @@ Rules:
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "32kb" }));
+const smallJson = express.json({ limit: "32kb" });
+const imageJson = express.json({ limit: "8mb" });
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, model: MODEL });
+  res.json({ ok: true, model: MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
 });
 
-app.post("/api/command", async (req, res) => {
+app.post("/api/command", smallJson, async (req, res) => {
   const t0 = performance.now();
   const body = req.body as Partial<CommandRequest>;
   const transcript = typeof body?.transcript === "string" ? body.transcript.trim() : "";
@@ -99,9 +126,183 @@ app.post("/api/command", async (req, res) => {
   }
 });
 
+/** Provider failure carrying the upstream HTTP status and error body for the stage. */
+class ProviderError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+type EditInput = {
+  image: string;
+  highlight: string;
+  prompt: string;
+  width: number;
+  height: number;
+  meta: Partial<MetaSpeedOptions>;
+};
+type EditOutput = { data: string; mime: string };
+
+const GEMINI_EDIT_INSTRUCTIONS = (prompt: string) => `You are given two images of the same photo.
+Image 1 is the original photo. Image 2 is identical except the region to edit is tinted magenta and outlined.
+Edit image 1 ONLY inside the highlighted region: ${prompt}
+Keep everything else identical: same framing, camera angle, lighting, colors, and resolution.
+Output only the edited version of image 1, with no magenta tint or outline.`;
+
+async function editWithGemini(b: EditInput, signal: AbortSignal): Promise<EditOutput> {
+  const ratio = b.width / b.height;
+  const aspect = ASPECTS.reduce((best, a) => {
+    const [w, h] = a.split(":").map(Number);
+    const [bw, bh] = best.split(":").map(Number);
+    return Math.abs(Math.log(w / h / ratio)) < Math.abs(Math.log(bw / bh / ratio)) ? a : best;
+  });
+  const r = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-goog-api-key": API_KEY! },
+    signal,
+    body: JSON.stringify({
+      model: GEMINI_IMAGE_MODEL,
+      store: false,
+      input: [
+        { type: "text", text: GEMINI_EDIT_INSTRUCTIONS(b.prompt) },
+        { type: "image", mime_type: "image/jpeg", data: b.image },
+        { type: "image", mime_type: "image/jpeg", data: b.highlight },
+      ],
+      response_format: { type: "image", mime_type: "image/jpeg", aspect_ratio: aspect, image_size: "1K" },
+    }),
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    let msg = detail.slice(0, 300);
+    try {
+      msg = (JSON.parse(detail) as { error?: { message?: string } }).error?.message ?? msg;
+    } catch {
+      /* keep raw text */
+    }
+    throw new ProviderError(r.status, `gemini ${r.status}: ${msg}`);
+  }
+  const out = extractImage(await r.json());
+  if (!out) throw new ProviderError(502, "gemini returned no image");
+  return out;
+}
+
+const META_EDIT_PROMPT = (prompt: string) =>
+  `@Image1 is the photo. @Image2 is the same photo with the target object tinted magenta and outlined. ${prompt.replace(/[.\s]+$/, "")}. Edit only the highlighted object in @Image1 and keep everything else identical.`;
+
+let loggedMetaKeys = false;
+
+type MetaImagesResponse = { data?: { b64_json?: string; url?: string }[]; output_format?: string };
+
+/** Merges validated per-request overrides onto the .env defaults. */
+function metaSpeed(o: Partial<MetaSpeedOptions>): MetaSpeedOptions {
+  const out = { ...META_DEFAULTS };
+  if (o.reasoning_strength === "low" || o.reasoning_strength === "high") out.reasoning_strength = o.reasoning_strength;
+  for (const k of ["enable_web_search", "enable_image_search", "enable_shell"] as const) {
+    if (typeof o[k] === "boolean") out[k] = o[k];
+  }
+  return out;
+}
+
+async function editWithMeta(b: EditInput, signal: AbortSignal): Promise<EditOutput> {
+  if (!META_API_KEY) throw new ProviderError(500, "META_API_KEY missing from .env");
+  const speed = metaSpeed(b.meta);
+  const r = await fetch(META_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${META_API_KEY}` },
+    signal,
+    body: JSON.stringify({
+      model: META_IMAGE_MODEL,
+      prompt: META_EDIT_PROMPT(b.prompt),
+      n: 1,
+      images: [
+        { image_url: `data:image/jpeg;base64,${b.image}` },
+        { image_url: `data:image/jpeg;base64,${b.highlight}` },
+      ],
+      // Not in the minimal example, but documented: size sets the aspect ratio (so the composite
+      // isn't stretched) and output_format overrides the webp default.
+      size: `${b.width}x${b.height}`,
+      output_format: "jpeg",
+      reasoning_strength: speed.reasoning_strength,
+      tool_enablement: {
+        enable_web_search: speed.enable_web_search,
+        enable_image_search: speed.enable_image_search,
+        enable_shell: speed.enable_shell,
+      },
+    }),
+  });
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 500);
+    throw new ProviderError(r.status, `meta ${r.status}: ${detail || r.statusText}`);
+  }
+  const json = (await r.json()) as MetaImagesResponse;
+  if (!loggedMetaKeys) {
+    loggedMetaKeys = true;
+    console.log("[meta] response keys:", Object.keys(json), "data[0] keys:", Object.keys(json.data?.[0] ?? {}));
+  }
+  const item = json.data?.[0];
+  const mime = `image/${json.output_format ?? "jpeg"}`;
+  if (item?.b64_json) return { data: item.b64_json, mime };
+  if (item?.url) {
+    const img = await fetch(item.url, { signal });
+    if (!img.ok) throw new ProviderError(502, `meta image url fetch ${img.status}`);
+    const type = img.headers.get("content-type") ?? mime;
+    return { data: Buffer.from(await img.arrayBuffer()).toString("base64"), mime: type };
+  }
+  throw new ProviderError(502, "meta returned no image (no b64_json or url in data[0])");
+}
+
+app.post("/api/edit", imageJson, async (req, res) => {
+  const t0 = performance.now();
+  const b = req.body as Partial<EditRequest>;
+  if (typeof b?.image !== "string" || typeof b.highlight !== "string" || typeof b.prompt !== "string" || !b.prompt.trim()) {
+    res.status(400).json({ error: "image, highlight and prompt required" } satisfies EditResponse);
+    return;
+  }
+  const input: EditInput = {
+    image: b.image,
+    highlight: b.highlight,
+    prompt: b.prompt.trim(),
+    width: Math.round(b.width ?? 1024),
+    height: Math.round(b.height ?? 576),
+    meta: b.meta && typeof b.meta === "object" ? b.meta : {},
+  };
+
+  try {
+    const signal = AbortSignal.timeout(EDIT_TIMEOUT_MS);
+    const out = IMAGE_PROVIDER === "meta" ? await editWithMeta(input, signal) : await editWithGemini(input, signal);
+    const ms = Math.round(performance.now() - t0);
+    console.log(`[${ms}ms] ${IMAGE_PROVIDER} edit "${input.prompt}" -> ${out.mime}, ${Math.round(out.data.length / 1024)}kB b64`);
+    res.json({ image: out.data, mime: out.mime, ms } satisfies EditResponse);
+  } catch (e) {
+    const timedOut = e instanceof DOMException && e.name === "TimeoutError";
+    console.error(`${IMAGE_PROVIDER} edit error:`, e instanceof Error ? e.message : e);
+    const status = e instanceof ProviderError ? (e.status === 429 ? 429 : 502) : timedOut ? 504 : 500;
+    const msg = timedOut
+      ? `${IMAGE_PROVIDER} image model timed out after ${EDIT_TIMEOUT_MS / 1000}s`
+      : e instanceof Error
+        ? e.message
+        : String(e);
+    res.status(status).json({ error: msg } satisfies EditResponse);
+  }
+});
+
+type Block = { type?: string; text?: string; data?: string; mime_type?: string };
+type Interaction = { steps?: { type?: string; content?: Block[] }[]; output_image?: Block };
+
+/** Last image block of the model output (what the SDK's `output_image` returns). */
+function extractImage(json: unknown): { data: string; mime: string } | null {
+  const j = json as Interaction;
+  const blocks = (j.steps ?? []).filter((s) => s.type === "model_output").flatMap((s) => s.content ?? []);
+  const img = blocks.filter((c) => c.type === "image" && c.data).pop() ?? j.output_image;
+  return img?.data ? { data: img.data, mime: img.mime_type ?? "image/jpeg" } : null;
+}
+
 /** Concatenates the text parts of the interaction's model_output steps. */
 function extractText(json: unknown): string {
-  const steps = (json as { steps?: { type?: string; content?: { type?: string; text?: string }[] }[] }).steps ?? [];
+  const steps = (json as Interaction).steps ?? [];
   return steps
     .filter((s) => s.type === "model_output")
     .flatMap((s) => s.content ?? [])
@@ -110,6 +311,11 @@ function extractText(json: unknown): string {
     .join("");
 }
 
-app.listen(PORT, () => {
-  console.log(`proxy on http://localhost:${PORT} (model ${MODEL})`);
+app.listen(PORT, (err?: Error) => {
+  // Express 5 reports listen errors (e.g. EADDRINUSE) here instead of throwing.
+  if (err) {
+    console.error(`proxy failed to listen on :${PORT}: ${err.message}`);
+    process.exit(1);
+  }
+  console.log(`proxy on http://localhost:${PORT} (model ${MODEL}, image ${IMAGE_PROVIDER}/${IMAGE_MODEL})`);
 });

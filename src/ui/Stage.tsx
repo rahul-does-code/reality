@@ -4,6 +4,11 @@ import { FrameHistory } from "../commands/history";
 import { initSegmenter, segmentAt } from "../vision/segmenter";
 import { feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
+import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
+import { composite } from "../edit/composite";
+import { removeObject } from "../edit/remove";
+import { replaceObject } from "../edit/replace";
+import { maskDataUrl } from "../edit/modelEdit";
 import { PushToTalk, speechSupported } from "../input/speech";
 import { HandTracker } from "../input/handTracker";
 import { parseCommand } from "../commands/geminiParse";
@@ -20,6 +25,10 @@ export default function Stage() {
   // Mirrors of state that async flows (voice, hand) read after awaits.
   const alphaRef = useRef<Float32Array | null>(null);
   const segPromiseRef = useRef<Promise<void> | null>(null);
+  // Last blur: the frame it was applied on, its mask, and every frame it produced, so an
+  // intensity "adjust" right after re-blurs from the pre-blur frame instead of stacking.
+  const lastBlurRef = useRef<{ base: ImageData; alpha: Float32Array; results: ImageData[] } | null>(null);
+  const modelBusyRef = useRef(false);
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string | undefined>();
@@ -44,6 +53,9 @@ export default function Stage() {
     speechSupported() ? "hold V to talk" : "Voice commands need the Web Speech API (Chrome/Edge). Use the text box instead.",
   );
   const [devText, setDevText] = useState("");
+  // Model edit in flight: the mask (as a data URL) the shimmer is clipped to.
+  const [thinkingMask, setThinkingMask] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // Hand mode: fingertip cursor on the live feed; holding V freezes + points at the fingertip.
   const trackerRef = useRef<HandTracker | null>(null);
@@ -157,23 +169,91 @@ export default function Stage() {
     void runSegment(p);
   };
 
-  const recolorWith = useCallback((c: string): boolean => {
-    const canvas = canvasRef.current;
-    const cur = historyRef.current.current;
-    const a = alphaRef.current;
-    if (!canvas || !cur || !a) return false;
-    const out = recolor(cur, a, c);
-    canvas.getContext("2d")!.putImageData(out, 0, 0);
+  const pushFrame = useCallback((out: ImageData) => {
+    canvasRef.current?.getContext("2d")!.putImageData(out, 0, 0);
     historyRef.current.push(out);
     setDepth(historyRef.current.depth);
-    return true;
   }, []);
+
+  const recolorWith = useCallback(
+    (c: string): boolean => {
+      const cur = historyRef.current.current;
+      const a = alphaRef.current;
+      if (!canvasRef.current || !cur || !a) return false;
+      pushFrame(recolor(cur, a, c));
+      return true;
+    },
+    [pushFrame],
+  );
+
+  const blurWith = useCallback(
+    (base: ImageData, a: Float32Array, intensity: number) => {
+      const out = blurMasked(base, a, intensity);
+      pushFrame(out);
+      const prev = lastBlurRef.current;
+      if (prev && prev.base === base && prev.alpha === a) prev.results.push(out);
+      else lastBlurRef.current = { base, alpha: a, results: [out] };
+    },
+    [pushFrame],
+  );
+
+  const showEditError = useCallback((msg: string) => {
+    setEditError(msg);
+    // Long enough to read a provider's status + error body.
+    setTimeout(() => setEditError((m) => (m === msg ? null : m)), 12000);
+  }, []);
+
+  /**
+   * remove/replace via the image model. The model sees the clean ORIGINAL frame; its output is
+   * composited into the current frame only inside the mask, so earlier edits elsewhere survive
+   * and everything outside the mask stays pixel-identical. Remove falls back to a heavy blur.
+   */
+  const modelOp = useCallback(
+    async (op: "remove" | "replace", prompt: string): Promise<string> => {
+      const original = historyRef.current.original;
+      const base = historyRef.current.current;
+      const a = alphaRef.current;
+      if (!original || !base || !a) return "point at an object first";
+      if (modelBusyRef.current) return "another edit is still running";
+      modelBusyRef.current = true;
+      setEditError(null);
+      setThinkingMask(maskDataUrl(a, original.width, original.height));
+      try {
+        const edited = op === "remove" ? await removeObject(original, a) : await replaceObject(original, a, prompt);
+        // Undo/resume/another edit while we waited would make this result stale.
+        if (historyRef.current.current !== base) return "frame changed during the edit; result discarded";
+        pushFrame(composite(base, edited, a));
+        edited.close();
+        return op === "remove" ? "removed" : "replaced";
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[edit] ${op} failed`, e);
+        if (op === "remove" && historyRef.current.current === base) {
+          blurWith(base, a, 1);
+          showEditError(`Remove failed (${msg}). Applied a heavy blur instead.`);
+          return "model failed, heavy blur instead";
+        }
+        showEditError(`${op === "remove" ? "Remove" : "Replace"} failed: ${msg}`);
+        return `${op} failed: ${msg}`;
+      } finally {
+        modelBusyRef.current = false;
+        setThinkingMask(null);
+      }
+    },
+    [pushFrame, blurWith, showEditError],
+  );
 
   const applyRecolor = useCallback(() => recolorWith(color), [recolorWith, color]);
 
   // Executes a parsed command and returns a short status for the voice line.
   const dispatch = useCallback(
-    (cmd: Command, isRetry = false): string => {
+    async (cmd: Command, isRetry = false): Promise<string> => {
+      const needSelection = () =>
+        !historyRef.current.current
+          ? "freeze the frame first (Space)"
+          : !alphaRef.current
+            ? "point at (click) an object first"
+            : null;
       switch (cmd.op) {
         case "undo":
           if (!historyRef.current.canUndo) return "nothing to undo";
@@ -183,12 +263,12 @@ export default function Stage() {
           const prev = lastEditRef.current;
           if (!prev) return "nothing to retry";
           if (isRetry) return "retry loop ignored";
-          return `retry: ${dispatch(prev, true)}`;
+          return `retry: ${await dispatch(prev, true)}`;
         }
         case "recolor": {
           if (!cmd.color || !CSS.supports("color", cmd.color)) return `recolor: bad color "${cmd.color}"`;
-          if (!historyRef.current.current) return "freeze the frame first (Space)";
-          if (!alphaRef.current) return "point at (click) an object first";
+          const missing = needSelection();
+          if (missing) return missing;
           if (!recolorWith(cmd.color)) return "recolor failed";
           if (/^#[0-9a-f]{6}$/i.test(cmd.color)) setColor(cmd.color);
           if (!isRetry) lastEditRef.current = cmd;
@@ -196,13 +276,39 @@ export default function Stage() {
           const note = cmd.target === "named" && cmd.target_name ? ` (used selection for "${cmd.target_name}")` : "";
           return `recolored ${cmd.color}${note}`;
         }
-        default:
-          console.log("[voice] op not implemented yet:", cmd);
+        case "blur": {
+          const missing = needSelection();
+          if (missing) return missing;
+          const intensity = cmd.intensity ?? DEFAULT_BLUR;
+          blurWith(historyRef.current.current!, alphaRef.current!, intensity);
           if (!isRetry) lastEditRef.current = cmd;
-          return `${cmd.op} not implemented yet`;
+          return `blurred ${Math.round(intensity * 100)}%`;
+        }
+        case "adjust": {
+          const blur = lastBlurRef.current;
+          const cur = historyRef.current.current;
+          // "less"/"more" right after a blur: redo it from the pre-blur frame at the new strength.
+          if (cmd.intensity !== null && blur && cur && blur.results.includes(cur)) {
+            blurWith(blur.base, blur.alpha, cmd.intensity);
+            if (!isRetry) lastEditRef.current = cmd;
+            return `blur → ${Math.round(Math.min(1, Math.max(0, cmd.intensity)) * 100)}%`;
+          }
+          console.log("[voice] adjust not implemented for this edit yet:", cmd);
+          return "adjust only works right after a blur for now";
+        }
+        case "remove":
+        case "replace": {
+          const missing = needSelection();
+          if (missing) return missing;
+          const prompt = cmd.op === "replace" ? cmd.prompt?.trim() : "";
+          if (cmd.op === "replace" && !prompt) return "replace: no prompt from the parser";
+          const result = await modelOp(cmd.op, prompt ?? "");
+          if (!isRetry) lastEditRef.current = cmd;
+          return result;
+        }
       }
     },
-    [undo, recolorWith],
+    [undo, recolorWith, blurWith, modelOp],
   );
   // The parse is async, so call through a ref to get the dispatch with current state.
   const dispatchRef = useRef(dispatch);
@@ -218,8 +324,9 @@ export default function Stage() {
       const { command, ms } = await parseCommand(transcript, lastEditRef.current);
       console.log("[voice]", transcript, command);
       await segPromiseRef.current; // a hand-mode point may still be segmenting
-      const result = dispatchRef.current(command);
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
+      setVoiceStatus(`"${transcript}" → ${detail} · working...`);
+      const result = await dispatchRef.current(command);
       setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${ms}ms`);
     } catch (e) {
       setVoiceStatus(`"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
@@ -404,6 +511,13 @@ export default function Stage() {
           {frozen ? "FROZEN" : "LIVE"}
           {busy ? " · …" : ""}
         </div>
+        {thinkingMask && (
+          <div
+            className="thinking"
+            style={{ maskImage: `url(${thinkingMask})`, WebkitMaskImage: `url(${thinkingMask})` }}
+          />
+        )}
+        {editError && <div className="error">{editError}</div>}
         <div ref={cursorRef} className="hand-cursor" />
         <div className="badge badge-right">
           model: {modelState}

@@ -53,3 +53,21 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 50%; background: #00e5ff; box-shadow: 0 0 0 2px #000a, 0 0 12px #00e5ffaa;
   pointer-events: none;
 }
+
+/* Model edit in flight: shimmer clipped to the mask via CSS mask-image (set inline). */
+.thinking {
+  position: absolute; inset: 0; pointer-events: none;
+  mask-size: 100% 100%; -webkit-mask-size: 100% 100%;
+  background:
+    linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.6) 50%, transparent 65%) 0 0 / 250% 100%,
+    rgba(255, 60, 160, 0.28);
+  animation: shimmer 1.3s linear infinite;
+}
+@keyframes shimmer {
+  from { background-position: 150% 0, 0 0; }
+  to { background-position: -150% 0, 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking { animation: none; opacity: 0.8; }
+}
+.error { max-height: 40%; overflow: auto; overflow-wrap: anywhere; }
