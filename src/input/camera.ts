@@ -16,8 +16,8 @@ export async function startCamera(
   stopCamera(video);
   const stream = await navigator.mediaDevices.getUserMedia({
     video: deviceId
-      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "environment" },
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+      : { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: "environment" },
     audio: false,
   });
   if (token !== startToken) {

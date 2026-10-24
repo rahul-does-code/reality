@@ -53,6 +53,17 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 50%; background: #00e5ff; box-shadow: 0 0 0 2px #000a, 0 0 12px #00e5ffaa;
   pointer-events: none;
 }
+.hand-cursor.pressed { background: #ff3ca0; box-shadow: 0 0 0 2px #000a, 0 0 14px #ff3ca0cc; transform: scale(0.8); }
+/* Debug HUD: unfiltered fingertip and tracker stats. */
+.hand-raw {
+  display: none; position: absolute; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+  border-radius: 50%; background: #ffd21f; pointer-events: none;
+}
+.hand-hud {
+  position: absolute; left: 10px; top: 40px; margin: 0; padding: 6px 8px; border-radius: 6px;
+  background: #000b; color: #e8e8f0; font: 11px/1.4 ui-monospace, monospace; pointer-events: none;
+  white-space: pre;
+}
 
 /* Model edit in flight: shimmer clipped to the mask via CSS mask-image (set inline). */
 .thinking {

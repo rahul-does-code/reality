@@ -13,7 +13,8 @@ import { Timeline } from "../commands/timeline";
 
 const CROSSFADE_MS = 400;
 import { PushToTalk, speechSupported } from "../input/speech";
-import { HandTracker } from "../input/handTracker";
+import { AIM_AHEAD, HandTracker, handTuning } from "../input/handTracker";
+import { emitMouse, pointer, usePointerSamples, type PointerSource } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
 import type { Command } from "../commands/schema";
 
@@ -74,6 +75,12 @@ export default function Stage() {
   const [handMode, setHandMode] = useState(false);
   const [handStatus, setHandStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [handSeen, setHandSeen] = useState(false);
+  const [aimAhead, setAimAhead] = useState(AIM_AHEAD);
+  const [showHud, setShowHud] = useState(false);
+  const hudRef = useRef<HTMLPreElement>(null);
+  const rawDotRef = useRef<HTMLDivElement>(null);
+  // Last `pressed` per source, to act on the press edge only.
+  const pressedRef = useRef<Record<PointerSource, boolean>>({ finger: false, mouse: false });
 
   // Preload the segmentation model so the first click is fast.
   useEffect(() => {
@@ -168,17 +175,35 @@ export default function Stage() {
     return job;
   }, []);
 
-  // Click-to-point (stand-in for the fingertip). Maps screen px -> frame px.
-  const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!frozen) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const p = {
-      x: Math.round(((e.clientX - rect.left) / rect.width) * size.w),
-      y: Math.round(((e.clientY - rect.top) / rect.height) * size.h),
-    };
-    setPoint(p);
-    void runSegment(p);
+  // The mouse on the frozen canvas emits the same PointerSamples as the hand.
+  const onCanvasMouse = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h);
   };
+  const onCanvasLeave = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, false);
+  };
+
+  // Selection reads samples only: a press (click or pinch) on the frozen frame points there.
+  // The finger also drives the on-screen cursor, moved on the DOM to avoid re-renders.
+  usePointerSamples((s) => {
+    const wasPressed = pressedRef.current[s.source];
+    pressedRef.current[s.source] = s.pressed;
+    if (s.source === "finger") {
+      setHandSeen(s.handPresent);
+      const cursor = cursorRef.current;
+      if (cursor) {
+        cursor.style.display = s.handPresent ? "block" : "none";
+        cursor.classList.toggle("pressed", s.pressed);
+        cursor.style.left = `${(s.x / size.w) * 100}%`;
+        cursor.style.top = `${(s.y / size.h) * 100}%`;
+      }
+    }
+    if (s.pressed && !wasPressed && historyRef.current.current) {
+      const p = { x: s.x, y: s.y };
+      setPoint(p);
+      void runSegment(p);
+    }
+  });
 
   const pushFrame = useCallback((out: ImageData) => {
     canvasRef.current?.getContext("2d")!.putImageData(out, 0, 0);
@@ -401,7 +426,8 @@ export default function Stage() {
   const pttDown = useCallback(() => {
     if (handMode) {
       if (!historyRef.current.current) freeze();
-      const aim = trackerRef.current?.state?.aim;
+      const s = pointer.latest("finger");
+      const aim = s?.handPresent ? { x: s.x, y: s.y } : null;
       if (aim) {
         setPoint(aim);
         void runSegment(aim);
@@ -413,22 +439,13 @@ export default function Stage() {
     startTalking();
   }, [handMode, freeze, runSegment, startTalking]);
 
-  // Fingertip tracking runs only while hand mode is on. The cursor is moved directly on the
-  // DOM so 30-60 updates/s don't re-render the whole stage.
+  // Fingertip tracking runs only while hand mode is on; it feeds the pointer samples above.
   useEffect(() => {
     if (!handMode) return;
     const video = videoRef.current!;
     const cursor = cursorRef.current;
     setHandStatus("loading");
-    const tracker = new HandTracker((st) => {
-      setHandSeen(st !== null);
-      if (!cursor) return;
-      cursor.style.display = st ? "block" : "none";
-      if (st && video.videoWidth) {
-        cursor.style.left = `${(st.tip.x / video.videoWidth) * 100}%`;
-        cursor.style.top = `${(st.tip.y / video.videoHeight) * 100}%`;
-      }
-    });
+    const tracker = new HandTracker();
     trackerRef.current = tracker;
     tracker
       .start(video)
@@ -444,6 +461,37 @@ export default function Stage() {
       if (cursor) cursor.style.display = "none";
     };
   }, [handMode]);
+
+  useEffect(() => {
+    handTuning.aimAhead = aimAhead;
+  }, [aimAhead]);
+
+  // Debug HUD: refreshed a few times a second straight into the DOM.
+  useEffect(() => {
+    if (!showHud || !handMode) return;
+    const id = window.setInterval(() => {
+      const st = trackerRef.current?.stats();
+      const hud = hudRef.current;
+      const dot = rawDotRef.current;
+      if (!st || !hud) return;
+      const pt = (p: { x: number; y: number } | null) => (p ? `${Math.round(p.x)},${Math.round(p.y)}` : "-");
+      hud.textContent = [
+        `tracking ${st.fps} fps (${st.delegate ?? "?"})`,
+        `confidence ${st.confidence.toFixed(2)}`,
+        `pinch ratio ${st.pinchRatio?.toFixed(2) ?? "-"}${st.pressed ? " PRESSED" : ""}`,
+        `tip raw ${pt(st.rawTip)} · filtered ${pt(st.filteredTip)}`,
+        `jitter 1s px: raw ${st.jitterRaw.toFixed(2)} · old EMA ${st.jitterEma.toFixed(2)} · One Euro ${st.jitterFiltered.toFixed(2)}`,
+      ].join("\n");
+      if (dot) {
+        dot.style.display = st.rawTip ? "block" : "none";
+        if (st.rawTip) {
+          dot.style.left = `${(st.rawTip.x / size.w) * 100}%`;
+          dot.style.top = `${(st.rawTip.y / size.h) * 100}%`;
+        }
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, [showHud, handMode, size]);
 
   // Hold V to talk. Releasing outside the window (blur) also ends the utterance.
   useEffect(() => {
@@ -536,7 +584,10 @@ export default function Stage() {
           ref={canvasRef}
           className="layer"
           style={{ visibility: frozen ? "visible" : "hidden", cursor: frozen ? "crosshair" : "default" }}
-          onClick={onCanvasClick}
+          onMouseDown={onCanvasMouse}
+          onMouseUp={onCanvasMouse}
+          onMouseMove={onCanvasMouse}
+          onMouseLeave={onCanvasLeave}
         />
         <canvas
           ref={pendingRef}
@@ -563,6 +614,12 @@ export default function Stage() {
         )}
         {editError && <div className="error">{editError}</div>}
         <div ref={cursorRef} className="hand-cursor" />
+        {showHud && handMode && (
+          <>
+            <div ref={rawDotRef} className="hand-raw" />
+            <pre ref={hudRef} className="hand-hud" />
+          </>
+        )}
         <div className="badge badge-right">
           model: {modelState}
           {handMode && ` · hand: ${handStatus === "ready" ? (handSeen ? "tracking" : "no hand") : handStatus}`}
@@ -601,6 +658,26 @@ export default function Stage() {
           <input type="checkbox" checked={handMode} onChange={(e) => setHandMode(e.target.checked)} />
           Hand mode
         </label>
+        {handMode && (
+          <>
+            <label className="check" title="How far past the fingertip to point, in finger-segment lengths (not while pinching)">
+              Aim ahead
+              <input
+                type="range"
+                min={0}
+                max={3}
+                step={0.1}
+                value={aimAhead}
+                onChange={(e) => setAimAhead(Number(e.target.value))}
+              />
+              {aimAhead.toFixed(1)}
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={showHud} onChange={(e) => setShowHud(e.target.checked)} />
+              Hand HUD
+            </label>
+          </>
+        )}
         <label className="check">
           <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />
           Show mask
