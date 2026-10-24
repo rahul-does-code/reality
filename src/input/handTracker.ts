@@ -28,8 +28,8 @@ const MIN_TRACKING_CONFIDENCE = 0.6;
  * on slow moves; higher BETA = less lag on fast moves. Tune MIN_CUTOFF first holding still, then
  * BETA while moving quickly.
  */
-const MIN_CUTOFF = 1.0;
-const BETA = 0.02;
+export const MIN_CUTOFF = 1.0;
+export const BETA = 0.02;
 /** One Euro filter on the pinch ratio (unitless, ~0.1 closed to ~1+ open). */
 const PINCH_MIN_CUTOFF = 3.0;
 const PINCH_BETA = 0.5;
@@ -51,7 +51,7 @@ const LOST_AFTER = 5;
  * lengths (0 = the fingertip itself). Only applied while not pinching. Live-tunable via handTuning.
  */
 export const AIM_AHEAD = 1.0;
-export const handTuning = { aimAhead: AIM_AHEAD };
+export const handTuning = { aimAhead: AIM_AHEAD, minCutoff: MIN_CUTOFF, beta: BETA };
 
 /** Old 4-frame EMA, kept only so the debug stats can compare its jitter against the One Euro. */
 const EMA_ALPHA = 2 / (4 + 1);
@@ -263,6 +263,8 @@ export class HandTracker {
     // per-frame confidence (hands below MIN_HAND_PRESENCE_CONFIDENCE are dropped anyway).
     this.confidence = score ?? 1;
 
+    // Position filters follow the live-tunable values (the pinch filter keeps its own).
+    for (const f of [this.tipF, this.dipF, this.midF]) f.tune(handTuning.minCutoff, handTuning.beta);
     const px = (i: number): Point => ({ x: hand[i].x * w, y: hand[i].y * h });
     const rawTip = px(INDEX_TIP);
     const thumb = px(THUMB_TIP);
@@ -326,6 +328,11 @@ class OneEuro {
     this.prev = null;
   }
 
+  tune(minCutoff: number, beta: number) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+  }
+
   /** `tMs` must increase between calls. */
   filter(x: number, tMs: number): number {
     if (this.prev === null) {
@@ -354,6 +361,10 @@ class Euro2 {
   reset() {
     this.fx.reset();
     this.fy.reset();
+  }
+  tune(minCutoff: number, beta: number) {
+    this.fx.tune(minCutoff, beta);
+    this.fy.tune(minCutoff, beta);
   }
   filter(p: Point, tMs: number): Point {
     return { x: this.fx.filter(p.x, tMs), y: this.fy.filter(p.y, tMs) };

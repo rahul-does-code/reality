@@ -53,17 +53,22 @@ export function usePointerSamples(fn: Listener): void {
   useEffect(() => pointer.subscribe((s) => ref.current(s)), []);
 }
 
-/** Emit a mouse sample from an event on an element that displays a frame of `frameW` x `frameH`. */
+/**
+ * Emit a mouse sample from an event on an element that displays a frame of `frameW` x `frameH`.
+ * `mirrored`: the element is shown with scaleX(-1), so screen-left is frame-right.
+ */
 export function emitMouse(
   e: { clientX: number; clientY: number; buttons: number },
   el: Element,
   frameW: number,
   frameH: number,
   present = true,
+  mirrored = false,
 ): void {
   const rect = el.getBoundingClientRect();
+  const rx = (e.clientX - rect.left) / rect.width;
   pointer.emit({
-    x: Math.round(((e.clientX - rect.left) / rect.width) * frameW),
+    x: Math.round((mirrored ? 1 - rx : rx) * frameW),
     y: Math.round(((e.clientY - rect.top) / rect.height) * frameH),
     t: performance.now(),
     pressed: present && (e.buttons & 1) === 1,

@@ -60,10 +60,12 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   border-radius: 50%; background: #ffd21f; pointer-events: none;
 }
 .hand-hud {
-  position: absolute; left: 10px; top: 40px; margin: 0; padding: 6px 8px; border-radius: 6px;
-  background: #000b; color: #e8e8f0; font: 11px/1.4 ui-monospace, monospace; pointer-events: none;
-  white-space: pre;
+  position: absolute; left: 10px; top: 40px; padding: 6px 8px; border-radius: 6px;
+  background: #000b; color: #e8e8f0; font: 11px/1.4 ui-monospace, monospace;
 }
+.hand-hud pre { margin: 0; font: inherit; white-space: pre; pointer-events: none; }
+.hand-hud label { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.hand-hud input[type="range"] { width: 120px; }
 
 /* Model edit in flight: shimmer clipped to the mask via CSS mask-image (set inline). */
 .thinking {

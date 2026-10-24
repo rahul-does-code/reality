@@ -13,7 +13,7 @@ import { Timeline } from "../commands/timeline";
 
 const CROSSFADE_MS = 400;
 import { PushToTalk, speechSupported } from "../input/speech";
-import { AIM_AHEAD, HandTracker, handTuning } from "../input/handTracker";
+import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
 import { emitMouse, pointer, usePointerSamples, type PointerSource } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
 import type { Command } from "../commands/schema";
@@ -50,6 +50,8 @@ export default function Stage() {
   const [segInfo, setSegInfo] = useState("");
   const [modelState, setModelState] = useState<"loading" | "ready" | "failed">("loading");
   const [color, setColor] = useState(SWATCHES[0]);
+  // Display-only: the stage's frame layers get scaleX(-1). All data stays in raw frame px.
+  const [mirror, setMirror] = useState(true);
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
   const pttRef = useRef<PushToTalk | null>(null);
@@ -76,6 +78,8 @@ export default function Stage() {
   const [handStatus, setHandStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [handSeen, setHandSeen] = useState(false);
   const [aimAhead, setAimAhead] = useState(AIM_AHEAD);
+  const [minCutoff, setMinCutoff] = useState(MIN_CUTOFF);
+  const [beta, setBeta] = useState(BETA);
   const [showHud, setShowHud] = useState(false);
   const hudRef = useRef<HTMLPreElement>(null);
   const rawDotRef = useRef<HTMLDivElement>(null);
@@ -177,10 +181,10 @@ export default function Stage() {
 
   // The mouse on the frozen canvas emits the same PointerSamples as the hand.
   const onCanvasMouse = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h);
+    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, true, mirror);
   };
   const onCanvasLeave = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, false);
+    if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, false, mirror);
   };
 
   // Selection reads samples only: a press (click or pinch) on the frozen frame points there.
@@ -464,7 +468,9 @@ export default function Stage() {
 
   useEffect(() => {
     handTuning.aimAhead = aimAhead;
-  }, [aimAhead]);
+    handTuning.minCutoff = minCutoff;
+    handTuning.beta = beta;
+  }, [aimAhead, minCutoff, beta]);
 
   // Debug HUD: refreshed a few times a second straight into the DOM.
   useEffect(() => {
@@ -570,55 +576,82 @@ export default function Stage() {
   return (
     <div className="stage-wrap">
       <div className="stage" style={{ aspectRatio: `${size.w} / ${size.h}` }}>
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          className="layer"
-          style={{ visibility: frozen ? "hidden" : "visible" }}
-          onLoadedMetadata={(e) =>
-            setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })
-          }
-        />
-        <canvas
-          ref={canvasRef}
-          className="layer"
-          style={{ visibility: frozen ? "visible" : "hidden", cursor: frozen ? "crosshair" : "default" }}
-          onMouseDown={onCanvasMouse}
-          onMouseUp={onCanvasMouse}
-          onMouseMove={onCanvasMouse}
-          onMouseLeave={onCanvasLeave}
-        />
-        <canvas
-          ref={pendingRef}
-          className={pendingOn ? "layer pending on" : "layer pending"}
-          style={{ "--crossfade": `${CROSSFADE_MS}ms` } as React.CSSProperties}
-        />
-        <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
-        {frozen && point && (
-          <div
-            className="marker"
-            style={{ left: `${(point.x / size.w) * 100}%`, top: `${(point.y / size.h) * 100}%` }}
+        {/* Everything in frame coordinates lives here, so one transform keeps it all aligned. */}
+        <div className="layer" style={{ transform: mirror ? "scaleX(-1)" : undefined }}>
+          <video
+            ref={videoRef}
+            playsInline
+            muted
+            className="layer"
+            style={{ visibility: frozen ? "hidden" : "visible" }}
+            onLoadedMetadata={(e) =>
+              setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })
+            }
           />
-        )}
+          <canvas
+            ref={canvasRef}
+            className="layer"
+            style={{ visibility: frozen ? "visible" : "hidden", cursor: frozen ? "crosshair" : "default" }}
+            onMouseDown={onCanvasMouse}
+            onMouseUp={onCanvasMouse}
+            onMouseMove={onCanvasMouse}
+            onMouseLeave={onCanvasLeave}
+          />
+          <canvas
+            ref={pendingRef}
+            className={pendingOn ? "layer pending on" : "layer pending"}
+            style={{ "--crossfade": `${CROSSFADE_MS}ms` } as React.CSSProperties}
+          />
+          <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
+          {frozen && point && (
+            <div
+              className="marker"
+              style={{ left: `${(point.x / size.w) * 100}%`, top: `${(point.y / size.h) * 100}%` }}
+            />
+          )}
+          {thinkingMask && (
+            <div
+              className="thinking"
+              style={{ maskImage: `url(${thinkingMask})`, WebkitMaskImage: `url(${thinkingMask})` }}
+            />
+          )}
+          <div ref={cursorRef} className="hand-cursor" />
+          {showHud && handMode && <div ref={rawDotRef} className="hand-raw" />}
+        </div>
         {error && <div className="error">Camera error: {error}</div>}
         <div className="badge">
           {frozen ? "FROZEN" : "LIVE"}
           {busy ? " · …" : ""}
         </div>
-        {thinkingMask && (
-          <div
-            className="thinking"
-            style={{ maskImage: `url(${thinkingMask})`, WebkitMaskImage: `url(${thinkingMask})` }}
-          />
-        )}
         {editError && <div className="error">{editError}</div>}
-        <div ref={cursorRef} className="hand-cursor" />
         {showHud && handMode && (
-          <>
-            <div ref={rawDotRef} className="hand-raw" />
-            <pre ref={hudRef} className="hand-hud" />
-          </>
+          <div className="hand-hud">
+            <pre ref={hudRef} />
+            <label title="One Euro min cutoff (Hz): lower = steadier at rest, laggier on slow moves">
+              min cutoff
+              <input
+                type="range"
+                min={0.05}
+                max={5}
+                step={0.05}
+                value={minCutoff}
+                onChange={(e) => setMinCutoff(Number(e.target.value))}
+              />
+              {minCutoff.toFixed(2)}
+            </label>
+            <label title="One Euro beta: higher = less lag on fast moves, more jitter while moving">
+              beta
+              <input
+                type="range"
+                min={0}
+                max={0.2}
+                step={0.001}
+                value={beta}
+                onChange={(e) => setBeta(Number(e.target.value))}
+              />
+              {beta.toFixed(3)}
+            </label>
+          </div>
         )}
         <div className="badge badge-right">
           model: {modelState}
@@ -681,6 +714,10 @@ export default function Stage() {
         <label className="check">
           <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />
           Show mask
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={mirror} onChange={(e) => setMirror(e.target.checked)} />
+          Mirror view
         </label>
         {cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
