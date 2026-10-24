@@ -1,0 +1,41 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0b0f;
+  --fg: #f2f2f5;
+  --accent: #ff3ca0;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h1 { margin: 0 0 12px; font-size: 1.4rem; letter-spacing: 0.02em; }
+
+.stage-wrap { display: flex; flex-direction: column; gap: 12px; }
+.stage { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; }
+.layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.marker {
+  position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+  border: 3px solid var(--accent); border-radius: 50%; pointer-events: none;
+  box-shadow: 0 0 0 2px #000a;
+}
+.badge {
+  position: absolute; top: 10px; left: 10px; padding: 3px 8px; font-size: 12px;
+  font-weight: 700; background: #000a; border-radius: 6px; letter-spacing: 0.08em;
+}
+.error {
+  position: absolute; inset: auto 12px 12px 12px; padding: 10px 12px; background: #5a1020;
+  border-radius: 8px; font-size: 14px;
+}
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button, select {
+  background: #1b1b24; color: var(--fg); border: 1px solid #33334a; border-radius: 8px;
+  padding: 8px 12px; font-size: 14px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+.readout { margin-left: auto; font-size: 13px; opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+.badge-right { left: auto; right: 10px; font-weight: 500; opacity: 0.8; }
+.swatch { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 1px solid #0006; outline-offset: 2px; }
+.color { width: 36px; height: 34px; padding: 0; background: none; border: 1px solid #33334a; border-radius: 8px; cursor: pointer; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 13px; opacity: 0.85; }
