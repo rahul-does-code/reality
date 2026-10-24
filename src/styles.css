@@ -71,3 +71,10 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   .thinking { animation: none; opacity: 0.8; }
 }
 .error { max-height: 40%; overflow: auto; overflow-wrap: anywhere; }
+
+/* Model edit pending: dimmed copy of the masked region; fading it out reveals the result. */
+.pending { pointer-events: none; opacity: 0; transition: opacity var(--crossfade, 400ms) ease; }
+.pending.on { opacity: 1; transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .pending { transition: none; }
+}

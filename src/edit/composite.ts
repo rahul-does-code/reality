@@ -25,3 +25,19 @@ export function composite(base: ImageData, edited: CanvasImageSource, alpha: Flo
   ctx.drawImage(edited, 0, 0, c.width, c.height);
   return blendInside(base, ctx.getImageData(0, 0, c.width, c.height).data, alpha);
 }
+
+/** Dimmed, desaturated copy of `base` inside `alpha`; transparent elsewhere (a "pending" overlay). */
+export function dimInside(base: ImageData, alpha: Float32Array, brightness = 0.5): ImageData {
+  const out = new ImageData(base.width, base.height);
+  const s = base.data;
+  const d = out.data;
+  for (let i = 0; i < alpha.length; i++) {
+    const a = alpha[i];
+    if (a < 0.01) continue;
+    const j = i * 4;
+    const v = (0.299 * s[j] + 0.587 * s[j + 1] + 0.114 * s[j + 2]) * brightness;
+    d[j] = d[j + 1] = d[j + 2] = v;
+    d[j + 3] = a * 255;
+  }
+  return out;
+}

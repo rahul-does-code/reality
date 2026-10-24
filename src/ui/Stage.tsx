@@ -5,10 +5,13 @@ import { initSegmenter, segmentAt } from "../vision/segmenter";
 import { feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
-import { composite } from "../edit/composite";
+import { composite, dimInside } from "../edit/composite";
 import { removeObject } from "../edit/remove";
 import { replaceObject } from "../edit/replace";
-import { maskDataUrl } from "../edit/modelEdit";
+import { editTimeoutMs, maskDataUrl } from "../edit/modelEdit";
+import { Timeline } from "../commands/timeline";
+
+const CROSSFADE_MS = 400;
 import { PushToTalk, speechSupported } from "../input/speech";
 import { HandTracker } from "../input/handTracker";
 import { parseCommand } from "../commands/geminiParse";
@@ -20,6 +23,8 @@ export default function Stage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  // Dimmed/desaturated masked region while a model edit runs; fades out over the result.
+  const pendingRef = useRef<HTMLCanvasElement>(null);
   const historyRef = useRef(new FrameHistory());
   const reqId = useRef(0);
   // Mirrors of state that async flows (voice, hand) read after awaits.
@@ -56,6 +61,12 @@ export default function Stage() {
   // Model edit in flight: the mask (as a data URL) the shimmer is clipped to.
   const [thinkingMask, setThinkingMask] = useState<string | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [pendingOn, setPendingOn] = useState(false);
+
+  // Warm the proxy's timeout setting so the first model edit doesn't wait on it.
+  useEffect(() => {
+    void editTimeoutMs();
+  }, []);
 
   // Hand mode: fingertip cursor on the live feed; holding V freezes + points at the fingertip.
   const trackerRef = useRef<HandTracker | null>(null);
@@ -209,20 +220,34 @@ export default function Stage() {
    * and everything outside the mask stays pixel-identical. Remove falls back to a heavy blur.
    */
   const modelOp = useCallback(
-    async (op: "remove" | "replace", prompt: string): Promise<string> => {
+    async (op: "remove" | "replace", prompt: string, what: string, timeline?: Timeline): Promise<string> => {
       const original = historyRef.current.original;
       const base = historyRef.current.current;
       const a = alphaRef.current;
       if (!original || !base || !a) return "point at an object first";
       if (modelBusyRef.current) return "another edit is still running";
       modelBusyRef.current = true;
+      // Fire the request first (modelEdit encodes and sends synchronously); UI feedback after.
+      const request = op === "remove" ? removeObject(original, a, timeline) : replaceObject(original, a, prompt, timeline);
+
       setEditError(null);
+      setVoiceStatus(op === "remove" ? `Removing ${what}...` : `Replacing with: ${prompt}`);
+      const pending = pendingRef.current;
+      if (pending) {
+        pending.width = base.width;
+        pending.height = base.height;
+        pending.getContext("2d")!.putImageData(dimInside(base, a), 0, 0);
+      }
+      setPendingOn(true);
       setThinkingMask(maskDataUrl(a, original.width, original.height));
+
       try {
-        const edited = op === "remove" ? await removeObject(original, a) : await replaceObject(original, a, prompt);
+        const edited = await request;
         // Undo/resume/another edit while we waited would make this result stale.
         if (historyRef.current.current !== base) return "frame changed during the edit; result discarded";
+        // Final composite goes under the dimmed layer, which then fades out: a crossfade.
         pushFrame(composite(base, edited, a));
+        timeline?.mark("composited");
         edited.close();
         return op === "remove" ? "removed" : "replaced";
       } catch (e) {
@@ -238,6 +263,7 @@ export default function Stage() {
       } finally {
         modelBusyRef.current = false;
         setThinkingMask(null);
+        setPendingOn(false); // CSS transition fades the dimmed layer out over CROSSFADE_MS
       }
     },
     [pushFrame, blurWith, showEditError],
@@ -247,7 +273,7 @@ export default function Stage() {
 
   // Executes a parsed command and returns a short status for the voice line.
   const dispatch = useCallback(
-    async (cmd: Command, isRetry = false): Promise<string> => {
+    async (cmd: Command, isRetry = false, timeline?: Timeline): Promise<string> => {
       const needSelection = () =>
         !historyRef.current.current
           ? "freeze the frame first (Space)"
@@ -263,7 +289,7 @@ export default function Stage() {
           const prev = lastEditRef.current;
           if (!prev) return "nothing to retry";
           if (isRetry) return "retry loop ignored";
-          return `retry: ${await dispatch(prev, true)}`;
+          return `retry: ${await dispatch(prev, true, timeline)}`;
         }
         case "recolor": {
           if (!cmd.color || !CSS.supports("color", cmd.color)) return `recolor: bad color "${cmd.color}"`;
@@ -302,7 +328,8 @@ export default function Stage() {
           if (missing) return missing;
           const prompt = cmd.op === "replace" ? cmd.prompt?.trim() : "";
           if (cmd.op === "replace" && !prompt) return "replace: no prompt from the parser";
-          const result = await modelOp(cmd.op, prompt ?? "");
+          const what = cmd.target_name ?? "that";
+          const result = await modelOp(cmd.op, prompt ?? "", what, timeline);
           if (!isRetry) lastEditRef.current = cmd;
           return result;
         }
@@ -314,22 +341,31 @@ export default function Stage() {
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
 
-  const runCommand = useCallback(async (transcript: string) => {
+  const runCommand = useCallback(async (transcript: string, timeline: Timeline) => {
     if (!transcript) {
       setVoiceStatus("didn't catch that");
       return;
     }
+    timeline.setLabel(JSON.stringify(transcript));
     setVoiceStatus(`"${transcript}" · parsing...`);
     try {
       const { command, ms } = await parseCommand(transcript, lastEditRef.current);
+      timeline.mark("command parsed");
       console.log("[voice]", transcript, command);
-      await segPromiseRef.current; // a hand-mode point may still be segmenting
+      // Only wait if a hand-mode point is genuinely still segmenting; otherwise dispatch now.
+      if (!alphaRef.current && segPromiseRef.current) {
+        await segPromiseRef.current;
+        timeline.mark("mask ready");
+      }
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
       setVoiceStatus(`"${transcript}" → ${detail} · working...`);
-      const result = await dispatchRef.current(command);
+      const result = await dispatchRef.current(command, false, timeline);
+      if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
       setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${ms}ms`);
     } catch (e) {
       setVoiceStatus(`"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      timeline.print();
     }
   }, []);
 
@@ -349,8 +385,11 @@ export default function Stage() {
     const ptt = pttRef.current;
     if (!ptt?.listening) return;
     setListening(false);
+    const timeline = new Timeline("voice", "speech end");
     try {
-      void runCommand(await ptt.stop());
+      const transcript = await ptt.stop();
+      timeline.mark("transcript");
+      void runCommand(transcript, timeline);
     } catch (e) {
       setVoiceStatus(e instanceof Error ? e.message : String(e));
     }
@@ -499,6 +538,11 @@ export default function Stage() {
           style={{ visibility: frozen ? "visible" : "hidden", cursor: frozen ? "crosshair" : "default" }}
           onClick={onCanvasClick}
         />
+        <canvas
+          ref={pendingRef}
+          className={pendingOn ? "layer pending on" : "layer pending"}
+          style={{ "--crossfade": `${CROSSFADE_MS}ms` } as React.CSSProperties}
+        />
         <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
         {frozen && point && (
           <div
@@ -592,7 +636,7 @@ export default function Stage() {
             className="dev-cmd"
             onSubmit={(e) => {
               e.preventDefault();
-              void runCommand(devText.trim());
+              void runCommand(devText.trim(), new Timeline("typed", "text submitted"));
             }}
           >
             <input
