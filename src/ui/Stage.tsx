@@ -408,7 +408,9 @@ export default function Stage() {
     timeline.setLabel(JSON.stringify(transcript));
     setVoiceStatus(`"${transcript}" · parsing...`);
     try {
-      const { command, ms } = await parseCommand(transcript, lastEditRef.current);
+      const { command, ms, provider, fallback } = await parseCommand(transcript, lastEditRef.current);
+      const via = fallback ? `${provider} (fallback)` : provider;
+      if (fallback) console.warn("[voice] gemini fallback:", fallback);
       timeline.mark("command parsed");
       console.log("[voice]", transcript, command);
       // Only wait if a hand-mode point is genuinely still segmenting; otherwise dispatch now.
@@ -420,7 +422,7 @@ export default function Stage() {
       setVoiceStatus(`"${transcript}" → ${detail} · working...`);
       const result = await dispatchRef.current(command, false, timeline);
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
-      setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${ms}ms`);
+      setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
     } catch (e) {
       setVoiceStatus(`"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

@@ -1,8 +1,11 @@
 // Browser side of the command parser: transcript -> Command via the /api/command proxy.
 // The Gemini key never leaves the server.
-import type { Command, CommandRequest, CommandResponse } from "./schema";
+import type { Command, CommandProvider, CommandRequest, CommandResponse } from "./schema";
 
-export async function parseCommand(transcript: string, previous: Command | null): Promise<{ command: Command; ms: number }> {
+export async function parseCommand(
+  transcript: string,
+  previous: Command | null,
+): Promise<{ command: Command; ms: number; provider: CommandProvider; fallback?: string }> {
   const res = await fetch("/api/command", {
     method: "POST",
     headers: { "content-type": "application/json" },

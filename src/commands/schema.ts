@@ -53,12 +53,19 @@ export interface Command {
   select: Select | null;
 }
 
+export type CommandProvider = "gemini" | "meta";
+
 export interface CommandRequest {
   transcript: string;
   previous: Command | null;
+  /** Optional override of the server's COMMAND_PROVIDER. */
+  provider?: CommandProvider | "auto";
 }
 
-export type CommandResponse = { command: Command; ms: number } | { error: string };
+/** provider = who answered; fallback = why Gemini was skipped, when Meta answered in auto mode. */
+export type CommandResponse =
+  | { command: Command; ms: number; provider: CommandProvider; fallback?: string }
+  | { error: string };
 
 /** JSON Schema handed to Gemini as response_format.schema. */
 export const COMMAND_JSON_SCHEMA = {

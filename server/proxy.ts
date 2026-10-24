@@ -6,6 +6,8 @@ import cors from "cors";
 import {
   COMMAND_JSON_SCHEMA,
   validateCommand,
+  type Command,
+  type CommandProvider,
   type CommandRequest,
   type CommandResponse,
   type EditRequest,
@@ -19,6 +21,18 @@ const API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
 const THINKING = process.env.GEMINI_THINKING ?? "minimal";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
+
+// Command parsing: COMMAND_PROVIDER=auto (default: Gemini, then Muse Spark on 429/5xx/timeout/bad JSON),
+// gemini or meta (single provider, no fallback).
+const PROVIDERS = ["gemini", "meta", "auto"] as const;
+type ProviderMode = (typeof PROVIDERS)[number];
+const asMode = (v: unknown): ProviderMode | null => (PROVIDERS.includes(v as ProviderMode) ? (v as ProviderMode) : null);
+const COMMAND_PROVIDER: ProviderMode = asMode(process.env.COMMAND_PROVIDER) ?? "auto";
+const COMMAND_TIMEOUT_MS = 8_000;
+const META_CHAT_URL = "https://api.meta.ai/v1/chat/completions";
+const META_TEXT_MODEL = process.env.META_TEXT_MODEL ?? "muse-spark-1.3";
+// Reasoning can't be turned off on Muse Spark ("none" is a 400); "minimal" is the shortest pass.
+const META_REASONING_EFFORT = process.env.META_REASONING_EFFORT ?? "minimal";
 
 // Image edits (remove/replace): IMAGE_PROVIDER=meta (default, Muse Image) or gemini.
 const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER === "gemini" ? "gemini" : "meta";
@@ -40,12 +54,15 @@ const IMAGE_MODEL = IMAGE_PROVIDER === "meta" ? META_IMAGE_MODEL : GEMINI_IMAGE_
 const EDIT_TIMEOUT_MS = IMAGE_PROVIDER === "meta" ? 45_000 : 25_000;
 const ASPECTS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"];
 
-if (!API_KEY) {
+if (!API_KEY && (COMMAND_PROVIDER !== "meta" || IMAGE_PROVIDER === "gemini")) {
   console.error("GEMINI_API_KEY missing: add it to .env");
   process.exit(1);
 }
 if (IMAGE_PROVIDER === "meta" && !META_API_KEY) {
   console.warn("META_API_KEY missing: /api/edit will fail until it's in .env (or set IMAGE_PROVIDER=gemini)");
+}
+if (COMMAND_PROVIDER !== "gemini" && !META_API_KEY) {
+  console.warn(`META_API_KEY missing: COMMAND_PROVIDER=${COMMAND_PROVIDER} can't use Muse Spark until it's in .env`);
 }
 
 const SYSTEM_PROMPT = `You turn one spoken photo-editing command into JSON for a live camera editor.
@@ -83,13 +100,18 @@ Examples:
 - "select the tree" -> op select, target named, target_name "tree", select {source named, name "tree"}
 - "a bit bigger" (previous select {source named, name "tree"}) -> op select, select {source named, name "tree", refine grow}`;
 
+// Muse Spark gets the schema as response_format too; this is a belt-and-braces reminder for its output.
+const META_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+
+Output format: reply with exactly one JSON object with the keys op, target, target_name, color, adjust, prompt, intensity, select. No markdown, no code fences, no text before or after the JSON.`;
+
 const app = express();
 app.use(cors());
 const smallJson = express.json({ limit: "32kb" });
 const imageJson = express.json({ limit: "8mb" });
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, model: MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
+  res.json({ ok: true, model: MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
 });
 
 app.post("/api/command", smallJson, async (req, res) => {
@@ -102,47 +124,119 @@ app.post("/api/command", smallJson, async (req, res) => {
   }
   const previous = body.previous ?? null;
   const input = `Previous command: ${previous ? JSON.stringify(previous) : "none"}\nUtterance: "${transcript}"`;
+  // Per-request override (used by scripts/test-commands.mjs to compare providers).
+  const mode = asMode(body.provider) ?? COMMAND_PROVIDER;
 
+  let provider: CommandProvider = mode === "meta" ? "meta" : "gemini";
+  let fallback: string | undefined;
   try {
-    const r = await fetch(GEMINI_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": API_KEY },
-      body: JSON.stringify({
-        model: MODEL,
-        system_instruction: SYSTEM_PROMPT,
-        input,
-        store: false,
-        generation_config: { thinking_level: THINKING },
-        response_format: { type: "text", mime_type: "application/json", schema: COMMAND_JSON_SCHEMA },
-      }),
-    });
-    if (!r.ok) {
-      const detail = await r.text();
-      console.error(`gemini ${r.status}:`, detail);
-      res.status(502).json({ error: `gemini ${r.status}: ${detail.slice(0, 300)}` } satisfies CommandResponse);
-      return;
-    }
-    const text = extractText(await r.json());
-    let parsed: unknown;
+    let command: Command;
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      res.status(502).json({ error: `model returned non-JSON: ${text.slice(0, 200)}` } satisfies CommandResponse);
-      return;
-    }
-    const command = validateCommand(parsed);
-    if (typeof command === "string") {
-      res.status(502).json({ error: `schema mismatch (${command}): ${text.slice(0, 200)}` } satisfies CommandResponse);
-      return;
+      command = await parseWith(provider, input);
+    } catch (e) {
+      if (mode !== "auto" || !shouldFallback(e)) throw e;
+      fallback = errorMessage(e);
+      console.warn(`gemini failed (${fallback}), retrying with meta`);
+      provider = "meta";
+      command = await parseWith(provider, input);
     }
     const ms = Math.round(performance.now() - t0);
-    console.log(`[${ms}ms] "${transcript}" -> ${JSON.stringify(command)}`);
-    res.json({ command, ms } satisfies CommandResponse);
+    console.log(`[${ms}ms ${provider}${fallback ? " fallback" : ""}] "${transcript}" -> ${JSON.stringify(command)}`);
+    res.json({ command, ms, provider, ...(fallback ? { fallback } : {}) } satisfies CommandResponse);
   } catch (e) {
-    console.error("proxy error", e);
-    res.status(500).json({ error: e instanceof Error ? e.message : String(e) } satisfies CommandResponse);
+    const msg = errorMessage(e);
+    console.error(`${provider} command error:`, msg);
+    const status = e instanceof ProviderError ? (e.status === 429 ? 429 : 502) : isTimeout(e) ? 504 : 500;
+    const prefix = fallback ? `gemini failed (${fallback}); then ` : "";
+    res.status(status).json({ error: `${prefix}${msg}` } satisfies CommandResponse);
   }
 });
+
+/** Model output that isn't JSON or doesn't pass validateCommand. */
+class SchemaError extends Error {}
+
+const isTimeout = (e: unknown) => e instanceof DOMException && e.name === "TimeoutError";
+
+/** 429, 5xx, timeout, network failure or schema-invalid output: worth a second provider. */
+function shouldFallback(e: unknown): boolean {
+  if (e instanceof ProviderError) return e.status === 429 || e.status >= 500;
+  return e instanceof SchemaError || isTimeout(e) || e instanceof TypeError; // TypeError = fetch failed
+}
+
+function errorMessage(e: unknown): string {
+  if (isTimeout(e)) return `timed out after ${COMMAND_TIMEOUT_MS / 1000}s`;
+  return e instanceof Error ? e.message : String(e);
+}
+
+async function parseWith(provider: CommandProvider, input: string): Promise<Command> {
+  const signal = AbortSignal.timeout(COMMAND_TIMEOUT_MS);
+  const text = provider === "meta" ? await commandTextFromMeta(input, signal) : await commandTextFromGemini(input, signal);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new SchemaError(`${provider} returned non-JSON: ${text.slice(0, 200)}`);
+  }
+  const command = validateCommand(parsed);
+  if (typeof command === "string") throw new SchemaError(`${provider} schema mismatch (${command}): ${text.slice(0, 200)}`);
+  return command;
+}
+
+async function commandTextFromGemini(input: string, signal: AbortSignal): Promise<string> {
+  if (!API_KEY) throw new ProviderError(500, "GEMINI_API_KEY missing from .env");
+  const r = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-goog-api-key": API_KEY },
+    signal,
+    body: JSON.stringify({
+      model: MODEL,
+      system_instruction: SYSTEM_PROMPT,
+      input,
+      store: false,
+      generation_config: { thinking_level: THINKING },
+      response_format: { type: "text", mime_type: "application/json", schema: COMMAND_JSON_SCHEMA },
+    }),
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new ProviderError(r.status, `gemini ${r.status}: ${detail.slice(0, 300)}`);
+  }
+  return extractText(await r.json());
+}
+
+type ChatCompletion = { choices?: { message?: { content?: string | { type?: string; text?: string }[] | null } }[] };
+
+async function commandTextFromMeta(input: string, signal: AbortSignal): Promise<string> {
+  if (!META_API_KEY) throw new ProviderError(500, "META_API_KEY missing from .env");
+  const r = await fetch(META_CHAT_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${META_API_KEY}` },
+    signal,
+    body: JSON.stringify({
+      model: META_TEXT_MODEL,
+      messages: [
+        { role: "system", content: META_SYSTEM_PROMPT },
+        { role: "user", content: input },
+      ],
+      reasoning_effort: META_REASONING_EFFORT,
+      // Structured output (docs: /docs/structured-output). strict stays false: the schema uses
+      // ["string","null"] type arrays and no additionalProperties, which the strict-subset check
+      // may reject; output is still constrained to the schema, and validateCommand checks it anyway.
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "Command", schema: COMMAND_JSON_SCHEMA, strict: false },
+      },
+    }),
+  });
+  if (!r.ok) {
+    const detail = (await r.text()).slice(0, 300);
+    throw new ProviderError(r.status, `meta ${r.status}: ${detail || r.statusText}`);
+  }
+  const content = ((await r.json()) as ChatCompletion).choices?.[0]?.message?.content;
+  const text = Array.isArray(content) ? content.map((c) => c.text ?? "").join("") : (content ?? "");
+  // Strip a code fence in case the model wraps the JSON despite the instructions.
+  return text.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
+}
 
 /** Provider failure carrying the upstream HTTP status and error body for the stage. */
 class ProviderError extends Error {
@@ -335,5 +429,5 @@ app.listen(PORT, (err?: Error) => {
     console.error(`proxy failed to listen on :${PORT}: ${err.message}`);
     process.exit(1);
   }
-  console.log(`proxy on http://localhost:${PORT} (model ${MODEL}, image ${IMAGE_PROVIDER}/${IMAGE_MODEL})`);
+  console.log(`proxy on http://localhost:${PORT} (commands ${COMMAND_PROVIDER}: ${MODEL} / ${META_TEXT_MODEL}, image ${IMAGE_PROVIDER}/${IMAGE_MODEL})`);
 });
