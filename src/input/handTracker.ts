@@ -28,8 +28,8 @@ const MIN_TRACKING_CONFIDENCE = 0.6;
  * on slow moves; higher BETA = less lag on fast moves. Tune MIN_CUTOFF first holding still, then
  * BETA while moving quickly.
  */
-export const MIN_CUTOFF = 1.0;
-export const BETA = 0.02;
+export const MIN_CUTOFF = 5.0;
+export const BETA = 0.2;
 /** One Euro filter on the pinch ratio (unitless, ~0.1 closed to ~1+ open). */
 const PINCH_MIN_CUTOFF = 3.0;
 const PINCH_BETA = 0.5;
