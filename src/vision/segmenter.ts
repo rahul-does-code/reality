@@ -1,8 +1,8 @@
-import { FilesetResolver, InteractiveSegmenterLegacy } from "@mediapipe/tasks-vision";
+import { InteractiveSegmenterLegacy } from "@mediapipe/tasks-vision";
 import { binarize, componentAt, coverage, fallbackMask, invert, type Point } from "./mask";
+import { loadLocalModel, visionFileset } from "./assets";
 
-// WASM is copied to public/ by `node scripts/setup.mjs`. Model is local if downloaded, else fetched from Google.
-const WASM_PATH = "/mediapipe-wasm";
+// Model is local if downloaded by `node scripts/setup.mjs`, else fetched from Google.
 const LOCAL_MODEL = "/models/magic_touch.tflite";
 const REMOTE_MODEL =
   "https://storage.googleapis.com/mediapipe-models/interactive_segmenter/magic_touch/float32/1/magic_touch.tflite";
@@ -11,21 +11,9 @@ export type SegResult = { mask: Uint8Array; source: "model" | "fallback"; ms: nu
 
 let segmenterPromise: Promise<InteractiveSegmenterLegacy> | null = null;
 
-async function loadLocalModel(): Promise<Uint8Array | null> {
-  try {
-    const r = await fetch(LOCAL_MODEL);
-    const type = r.headers.get("content-type") ?? "";
-    // Vite serves index.html for missing files, so reject HTML responses.
-    if (r.ok && !type.includes("text/html")) return new Uint8Array(await r.arrayBuffer());
-  } catch {
-    /* fall through to remote */
-  }
-  return null;
-}
-
 async function create(delegate: "GPU" | "CPU") {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
-  const buf = await loadLocalModel();
+  const fileset = await visionFileset();
+  const buf = await loadLocalModel(LOCAL_MODEL);
   return InteractiveSegmenterLegacy.createFromOptions(fileset, {
     baseOptions: buf
       ? { modelAssetBuffer: buf, delegate }

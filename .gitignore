@@ -2,3 +2,4 @@ node_modules
 dist
 public/mediapipe-wasm
 public/models
+.env

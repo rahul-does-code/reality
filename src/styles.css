@@ -39,3 +39,17 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .swatch { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 1px solid #0006; outline-offset: 2px; }
 .color { width: 36px; height: 34px; padding: 0; background: none; border: 1px solid #33334a; border-radius: 8px; cursor: pointer; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; opacity: 0.85; }
+
+.voice { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.mic { user-select: none; touch-action: none; }
+.mic.on { border-color: var(--accent); background: #3a1028; }
+.dev-cmd input {
+  width: 300px; max-width: 100%; background: #111118; color: var(--fg); border: 1px dashed #44445a;
+  border-radius: 8px; padding: 8px 10px; font-size: 14px;
+}
+.voice-status { font-size: 13px; opacity: 0.8; font-variant-numeric: tabular-nums; }
+.hand-cursor {
+  display: none; position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  border-radius: 50%; background: #00e5ff; box-shadow: 0 0 0 2px #000a, 0 0 12px #00e5ffaa;
+  pointer-events: none;
+}
