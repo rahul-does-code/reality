@@ -51,6 +51,7 @@ export default function Stage() {
         if (cancelled) return;
         setCameras(await listCameras());
       } catch (e) {
+        if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
       }
     })();
