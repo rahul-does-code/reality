@@ -17,12 +17,19 @@ const UTTERANCES = [
   "replace that with a potted cactus",
   "make it warmer",
   "paint my shirt the color of a lemon",
+  // Selection (select object), each with a check on the parsed command.
+  ["change my nose", (c) => c.select?.source === "face_part" && c.select.face_part === "nose"],
+  ["only the top half of this can", (c) => c.select?.source === "pointed" && c.select.region?.side === "top" && c.select.region.fraction === 0.5],
+  ["select the tree", (c) => c.op === "select" && c.select?.source === "named" && c.select.name === "tree"],
+  ["a bit bigger", (c) => c.op === "select" && c.select?.refine === "grow"],
+  ["make the left third of this red", (c) => c.op === "recolor" && c.select?.region?.side === "left" && Math.abs(c.select.region.fraction - 0.33) < 0.02],
 ];
 
 let previous = null;
 let failures = 0;
 
-for (const transcript of UTTERANCES) {
+for (const entry of UTTERANCES) {
+  const [transcript, check] = Array.isArray(entry) ? entry : [entry, null];
   const t0 = performance.now();
   let line;
   try {
@@ -40,6 +47,10 @@ for (const transcript of UTTERANCES) {
       .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`)
       .join(" ");
     line = `${c.op.padEnd(8)} ${fields}`;
+    if (check && !check(c)) {
+      failures++;
+      line = `MISMATCH ${line}`;
+    }
   } catch (e) {
     failures++;
     line = `ERROR ${e.message}`;

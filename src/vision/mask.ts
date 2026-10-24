@@ -141,3 +141,54 @@ export function feather(mask: Uint8Array, w: number, h: number, radius = 3): Flo
   for (let i = 0; i < blurred.length; i++) blurred[i] = Math.min(1, blurred[i] * 1.4);
   return blurred;
 }
+
+/**
+ * Keep only one side of the mask's bounding box: e.g. side "top", fraction 0.5 = top half of the
+ * object. "center" keeps the middle `fraction` of the box in both directions.
+ */
+export function applyRegion(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  side: "top" | "bottom" | "left" | "right" | "center",
+  fraction: number,
+): Uint8Array {
+  const b = bbox(mask, w, h);
+  if (!b) return mask;
+  const f = clamp(fraction, 0, 1);
+  let x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h; // half-open box to keep
+  if (side === "top") y1 = b.y + Math.round(b.h * f);
+  else if (side === "bottom") y0 = y1 - Math.round(b.h * f);
+  else if (side === "left") x1 = b.x + Math.round(b.w * f);
+  else if (side === "right") x0 = x1 - Math.round(b.w * f);
+  else {
+    const mx = Math.round((b.w * (1 - f)) / 2);
+    const my = Math.round((b.h * (1 - f)) / 2);
+    x0 += mx; x1 -= mx; y0 += my; y1 -= my;
+  }
+  const out = new Uint8Array(mask.length);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) out[y * w + x] = mask[y * w + x];
+  }
+  return out;
+}
+
+/** Square-kernel morphology via the box blur: any set pixel within r (dilate) or all of them (erode). */
+function morph(mask: Uint8Array, w: number, h: number, r: number, grow: boolean): Uint8Array {
+  const f = new Float32Array(mask.length);
+  for (let i = 0; i < mask.length; i++) f[i] = mask[i];
+  const avg = boxBlur(f, w, h, r);
+  const out = new Uint8Array(mask.length);
+  for (let i = 0; i < out.length; i++) out[i] = (grow ? avg[i] > 1e-3 : avg[i] > 1 - 1e-3) ? 1 : 0;
+  return out;
+}
+
+export const dilate = (mask: Uint8Array, w: number, h: number, r: number) => morph(mask, w, h, r, true);
+export const erode = (mask: Uint8Array, w: number, h: number, r: number) => morph(mask, w, h, r, false);
+
+/** Grow/shrink step in px: 3-6, scaled with the object's size so small things don't vanish. */
+export function refineRadius(mask: Uint8Array, w: number, h: number): number {
+  const b = bbox(mask, w, h);
+  if (!b) return 3;
+  return clamp(Math.round(Math.min(b.w, b.h) * 0.03), 3, 6);
+}

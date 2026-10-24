@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { FrameHistory } from "../commands/history";
-import { initSegmenter, segmentAt } from "../vision/segmenter";
+import { initSegmenter } from "../vision/segmenter";
+import { resolveSelection, segmentPointed } from "../vision/select";
 import { feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
@@ -30,6 +31,8 @@ export default function Stage() {
   const reqId = useRef(0);
   // Mirrors of state that async flows (voice, hand) read after awaits.
   const alphaRef = useRef<Float32Array | null>(null);
+  const maskRef = useRef<Uint8Array | null>(null); // binary selection behind alphaRef, for refines
+  const pointRef = useRef<Point | null>(null);
   const segPromiseRef = useRef<Promise<void> | null>(null);
   // Last blur: the frame it was applied on, its mask, and every frame it produced, so an
   // intensity "adjust" right after re-blurs from the pre-blur frame instead of stacking.
@@ -121,6 +124,8 @@ export default function Stage() {
   const clearSelection = useCallback(() => {
     reqId.current++; // invalidate any in-flight segmentation
     alphaRef.current = null;
+    maskRef.current = null;
+    pointRef.current = null;
     segPromiseRef.current = null;
     setPoint(null);
     setAlpha(null);
@@ -165,11 +170,14 @@ export default function Stage() {
     if (!original) return Promise.resolve();
     const id = ++reqId.current;
     setBusy(true);
+    pointRef.current = p;
     alphaRef.current = null;
+    maskRef.current = null;
     setAlpha(null);
-    const job = segmentAt(original, p).then((res) => {
+    const job = segmentPointed(original, p).then((res) => {
       if (id !== reqId.current) return; // a newer click or a resume superseded this one
       const a = feather(res.mask, original.width, original.height, 3);
+      maskRef.current = res.mask;
       alphaRef.current = a;
       setAlpha(a);
       setSegInfo(`${res.source} · ${Math.round(res.ms)}ms${res.note ? ` · ${res.note}` : ""}`);
@@ -309,7 +317,29 @@ export default function Stage() {
           : !alphaRef.current
             ? "point at (click) an object first"
             : null;
+      // A voice `select` replaces the current selection before the op runs on it.
+      if (cmd.select && cmd.op !== "undo" && cmd.op !== "retry") {
+        const original = historyRef.current.original;
+        if (!original) return "freeze the frame first (Space)";
+        const id = ++reqId.current;
+        setBusy(true);
+        const sel = await resolveSelection(cmd.select, original, pointRef.current, maskRef.current);
+        if (id !== reqId.current) return "selection superseded by a new point";
+        setBusy(false);
+        if ("error" in sel) return sel.error;
+        maskRef.current = sel.mask;
+        alphaRef.current = sel.alpha;
+        setAlpha(sel.alpha);
+        setSegInfo(`select · ${sel.note}`);
+        timeline?.mark("selection resolved");
+        if (cmd.op === "select") {
+          if (!isRetry) lastEditRef.current = cmd;
+          return `selected${sel.note ? ` (${sel.note})` : ""}`;
+        }
+      }
       switch (cmd.op) {
+        case "select":
+          return "select: nothing to change";
         case "undo":
           if (!historyRef.current.canUndo) return "nothing to undo";
           undo();
@@ -328,7 +358,7 @@ export default function Stage() {
           if (/^#[0-9a-f]{6}$/i.test(cmd.color)) setColor(cmd.color);
           if (!isRetry) lastEditRef.current = cmd;
           // Named targets aren't segmented by name yet; the current selection stands in.
-          const note = cmd.target === "named" && cmd.target_name ? ` (used selection for "${cmd.target_name}")` : "";
+          const note = !cmd.select && cmd.target === "named" && cmd.target_name ? ` (used selection for "${cmd.target_name}")` : "";
           return `recolored ${cmd.color}${note}`;
         }
         case "blur": {

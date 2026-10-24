@@ -53,7 +53,7 @@ The user has frozen a camera frame and may be pointing at an object with their f
 
 Rules:
 - Output ONLY JSON that matches the response schema. Every field is required; use null when a field does not apply.
-- op must be one of: recolor, remove, blur, replace, adjust, undo, retry. Never invent other ops. If the request is unclear, pick the closest op.
+- op must be one of: recolor, remove, blur, replace, adjust, undo, retry, select. Never invent other ops. If the request is unclear, pick the closest op.
 - "that", "this", "it", "here", "there" refer to what the user is pointing at: target "pointed", target_name null. Never put a pronoun in target_name.
 - If the user names an object ("the mug", "my shirt"), use target "named" and target_name set to that object (short noun phrase, no article). If they both point and name ("make this cup red"), use target "pointed" and still fill target_name.
 - recolor: color is a CSS color name or #rrggbb hex. Map descriptive colors to hex (e.g. "baby blue" -> "#89cff0").
@@ -63,7 +63,25 @@ Rules:
 - blur: intensity 0..1 (default 0.6).
 - remove: erase the object and fill the background naturally.
 - replace: prompt is a self-contained image-edit instruction for an image model that will only see the image and this prompt. Describe what to put in place of the target, and explicitly say to preserve the scene's lighting, shadows, perspective and scale and leave everything else unchanged.
-- color is null unless op is recolor (or adjust toward a named color). prompt is null unless op is replace. adjust is null unless op is adjust.`;
+- color is null unless op is recolor (or adjust toward a named color). prompt is null unless op is replace. adjust is null unless op is adjust.
+
+Selection (the "select" field says WHAT to edit; op says what to DO):
+- select is null when the user just points ("make that red", "get rid of this") or repeats/undoes/adjusts an edit. Then the current selection is used.
+- Otherwise select = { source, name, face_part, region, refine }, with null for parts that don't apply:
+  - source "face_part" for the user's own face: face_part one of nose, lips, left_eye, right_eye, eyes, eyebrows, face, hair ("my mouth" -> lips, "my eyes" -> eyes).
+  - source "named" when the user names an object to find in the scene: name is a short noun phrase without article ("the tree" -> "tree"). Also set target "named" and target_name.
+  - source "pointed" when they point ("this", "that"), including with a region or refine.
+  - region { side: top|bottom|left|right|center, fraction 0..1 } keeps only part of the object: "top half" -> top 0.5, "left third" -> left 0.33, "the middle" -> center 0.5.
+  - refine "grow" or "shrink" changes the size of the current selection: "a bit bigger", "grow it", "include more" -> grow; "smaller", "tighter", "less of it" -> shrink. Copy source, name and face_part from the previous command's select if it had one, else source "pointed"; region null.
+- If the utterance only chooses or resizes what is selected and asks for no edit ("select the tree", "only the top half of this can", "a bit bigger", "change my nose"), op is "select" and color, adjust, prompt, intensity are null.
+- If it asks for an edit too ("make the top half of this can red", "blur my face"), use that op and fill select.
+- "bigger"/"smaller" are refine (op select), not adjust. adjust is only for color/brightness/strength of the previous edit.
+
+Examples:
+- "change my nose" -> op select, select {source face_part, face_part nose}
+- "only the top half of this can" -> op select, target pointed, select {source pointed, region {side top, fraction 0.5}}
+- "select the tree" -> op select, target named, target_name "tree", select {source named, name "tree"}
+- "a bit bigger" (previous select {source named, name "tree"}) -> op select, select {source named, name "tree", refine grow}`;
 
 const app = express();
 app.use(cors());
