@@ -96,3 +96,21 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
   .pending { transition: none; }
 }
+
+/* Cycling "what to say" hint, top center of the stage. */
+.hint {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 3px 10px;
+  font-size: 12px; background: #000a; border-radius: 6px; white-space: nowrap; pointer-events: none;
+  opacity: 0.85;
+}
+.hint b { color: var(--accent); }
+
+/* F = fullscreen stage: only the stage and a thin status line. */
+.status-line { display: none; }
+.stage-wrap:fullscreen { background: #000; gap: 0; justify-content: center; }
+.stage-wrap:fullscreen .controls, .stage-wrap:fullscreen .voice { display: none; }
+.stage-wrap:fullscreen .stage { width: min(100vw, calc((100vh - 22px) * var(--ar, 1.7778))); margin: 0 auto; border-radius: 0; }
+.stage-wrap:fullscreen .status-line {
+  display: block; height: 22px; padding: 3px 10px; font-size: 12px; opacity: 0.8;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums;
+}

@@ -27,8 +27,21 @@ import { parseCommand } from "../commands/geminiParse";
 import type { Command, Select } from "../commands/schema";
 
 const SWATCHES = ["#ff3ca0", "#e5322d", "#2f6bff", "#22b55e", "#ffd21f", "#8a3ffc"];
+const HINTS = ["make it pink", "blur that", "turn that into a cardboard box", "make the taller one red", "change my nose"];
+
+/** Human message for a getUserMedia / speech failure. */
+function permissionMessage(what: "Camera" | "Microphone", e: unknown): string {
+  const name = e instanceof DOMException ? e.name : "";
+  const msg = e instanceof Error ? e.message : String(e);
+  if (name === "NotAllowedError" || /not-allowed|denied|permission/i.test(msg))
+    return `${what} access denied. Allow it in the browser's site settings (address bar), then reload.`;
+  if (name === "NotFoundError") return `No ${what.toLowerCase()} found.`;
+  if (name === "NotReadableError") return `${what} is in use by another app.`;
+  return `${what} error: ${msg}`;
+}
 
 export default function Stage() {
+  const wrapRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -100,7 +113,7 @@ export default function Stage() {
   const [devText, setDevText] = useState("");
   // Model edit in flight: the mask (as a data URL) the shimmer is clipped to.
   const [thinkingMask, setThinkingMask] = useState<string | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [pendingOn, setPendingOn] = useState(false);
 
   // Warm the proxy's timeout setting so the first model edit doesn't wait on it.
@@ -149,7 +162,7 @@ export default function Stage() {
         setCameras(await listCameras());
       } catch (e) {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setError(permissionMessage("Camera", e));
       }
     })();
     return () => {
@@ -384,10 +397,10 @@ export default function Stage() {
     [pushFrame, recordEdit],
   );
 
-  const showEditError = useCallback((msg: string) => {
-    setEditError(msg);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
     // Long enough to read a provider's status + error body.
-    setTimeout(() => setEditError((m) => (m === msg ? null : m)), 12000);
+    setTimeout(() => setToast((m) => (m === msg ? null : m)), 12000);
   }, []);
 
   /**
@@ -406,7 +419,7 @@ export default function Stage() {
       // Fire the request first (modelEdit encodes and sends synchronously); UI feedback after.
       const request = op === "remove" ? removeObject(original, a, timeline) : replaceObject(original, a, prompt, timeline);
 
-      setEditError(null);
+      setToast(null);
       setVoiceStatus(op === "remove" ? `Removing ${what}...` : `Replacing with: ${prompt}`);
       const pending = pendingRef.current;
       if (pending) {
@@ -432,10 +445,10 @@ export default function Stage() {
         console.error(`[edit] ${op} failed`, e);
         if (op === "remove" && historyRef.current.current === base) {
           blurWith(base, a, 1);
-          showEditError(`Remove failed (${msg}). Applied a heavy blur instead.`);
+          showToast(`Remove failed (${msg}). Applied a heavy blur instead.`);
           return "model failed, heavy blur instead";
         }
-        showEditError(`${op === "remove" ? "Remove" : "Replace"} failed: ${msg}`);
+        showToast(`${op === "remove" ? "Remove" : "Replace"} failed: ${msg}`);
         return `${op} failed: ${msg}`;
       } finally {
         modelBusyRef.current = false;
@@ -443,7 +456,7 @@ export default function Stage() {
         setPendingOn(false); // CSS transition fades the dimmed layer out over CROSSFADE_MS
       }
     },
-    [pushFrame, blurWith, showEditError, recordEdit],
+    [pushFrame, blurWith, showToast, recordEdit],
   );
 
   const applyRecolor = useCallback(() => recolorWith(color), [recolorWith, color]);
@@ -656,11 +669,13 @@ export default function Stage() {
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
       setVoiceStatus(`${h}"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
     } catch (e) {
-      setVoiceStatus(`${h}"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      setVoiceStatus(`${h}"${transcript}" · error: ${msg}`);
+      showToast(`Command failed: ${msg}`);
     } finally {
       timeline.print();
     }
-  }, []);
+  }, [showToast]);
 
   const startTalking = useCallback(() => {
     if (!voiceSupported(voiceEngine) || pttRef.current?.listening) return;
@@ -696,6 +711,7 @@ export default function Stage() {
         heard = `${r.path === "muse" ? "muse" : "web speech (muse failed)"} ${r.ms}ms`;
         if (r.error) {
           console.warn("[voice] muse failed, used web speech:", r.error);
+          if (r.error.kind === "mic") showToast(permissionMessage("Microphone", r.error));
           if (r.path === "muse") throw r.error; // no Web Speech to fall back to
         }
       } else {
@@ -705,9 +721,12 @@ export default function Stage() {
       timeline.mark("transcript");
       void runCommand(transcript, timeline, heard);
     } catch (e) {
-      setVoiceStatus(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setVoiceStatus(msg);
+      if (/not-allowed|denied|permission|microphone/i.test(msg)) showToast(permissionMessage("Microphone", e));
+      else showToast(`Voice failed: ${msg}`);
     }
-  }, [runCommand]);
+  }, [runCommand, showToast]);
 
   // Push-to-talk press. In hand mode it also freezes (if live) and points at the fingertip
   // as of this instant. If already frozen, the frame is kept so refinements chain on it; a
@@ -880,10 +899,31 @@ export default function Stage() {
       } else if (e.key === "Escape") clearSelection();
       else if (e.key.toLowerCase() === "u") undo();
       else if (e.key.toLowerCase() === "r") applyRecolor();
+      else if (e.key.toLowerCase() === "f") {
+        const p = document.fullscreenElement ? document.exitFullscreen() : wrapRef.current?.requestFullscreen();
+        p?.catch((err) => showToast(`Fullscreen failed: ${err instanceof Error ? err.message : String(err)}`));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [frozen, freeze, resume, undo, applyRecolor, clearSelection]);
+  }, [frozen, freeze, resume, undo, applyRecolor, clearSelection, showToast]);
+
+  // Last-resort net: any async failure nobody caught becomes a toast instead of a silent console error.
+  useEffect(() => {
+    const onRejection = (e: PromiseRejectionEvent) => {
+      const r = e.reason;
+      showToast(`Something failed: ${r instanceof Error ? r.message : String(r)}`);
+    };
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => window.removeEventListener("unhandledrejection", onRejection);
+  }, [showToast]);
+
+  // Cycling hint: what to point at and say.
+  const [hint, setHint] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setHint((i) => (i + 1) % HINTS.length), 3500);
+    return () => clearInterval(id);
+  }, []);
 
   const readout = !frozen
     ? handMode
@@ -898,8 +938,8 @@ export default function Stage() {
           : "click an object";
 
   return (
-    <div className="stage-wrap">
-      <div className="stage" style={{ aspectRatio: `${size.w} / ${size.h}` }}>
+    <div className="stage-wrap" ref={wrapRef}>
+      <div className="stage" style={{ aspectRatio: `${size.w} / ${size.h}`, "--ar": size.w / size.h } as React.CSSProperties}>
         {/* Everything in frame coordinates lives here, so one transform keeps it all aligned. */}
         <div className="layer" style={{ transform: mirror ? "scaleX(-1)" : undefined }}>
           <video
@@ -960,12 +1000,15 @@ export default function Stage() {
             {selTag.text}
           </div>
         )}
-        {error && <div className="error">Camera error: {error}</div>}
+        {error && <div className="error">{error}</div>}
         <div className="badge">
           {frozen ? "FROZEN" : "LIVE"}
           {busy ? " · …" : ""}
         </div>
-        {editError && <div className="error">{editError}</div>}
+        {toast && <div className="error">{toast}</div>}
+        <div className="hint">
+          point, then say: <b>{HINTS[hint]}</b>
+        </div>
         {showHud && handMode && (
           <div className="hand-hud">
             <pre ref={hudRef} />
@@ -1118,6 +1161,10 @@ export default function Stage() {
           </select>
         </label>
         <span className="voice-status">{voiceStatus}</span>
+      </div>
+      {/* Fullscreen (F) hides the controls; this thin line keeps the status visible. */}
+      <div className="status-line">
+        {readout} · {voiceStatus}
       </div>
     </div>
   );
