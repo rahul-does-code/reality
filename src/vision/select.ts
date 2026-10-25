@@ -4,6 +4,7 @@ import { segmentAt, type SegResult } from "./segmenter";
 import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
+import { aiSegmentWithin, getAiMask } from "./aiMask";
 
 /**
  * mask: what edits apply to. subject: the same before any inversion, so "the background" is always
@@ -105,7 +106,7 @@ const SAMPLE_NAMES = ["center", "left", "right", "top", "bottom"];
  * Segment at the box center and four points 25% of the box away from it, and keep the mask whose
  * bounding box best matches Gemini's box (IoU). null if the segmenter produced nothing usable.
  */
-function maskForBox(frame: ImageData, key: string, box: NamedInstance["box"]) {
+export function maskForBox(frame: ImageData, key: string, box: NamedInstance["box"]) {
   let byKey = boxMaskCache.get(frame);
   if (!byKey) boxMaskCache.set(frame, (byKey = new Map()));
   const hit = byKey.get(key);
@@ -228,11 +229,14 @@ export async function resolveSelection(
     label = `${name} (named)`;
   } else if (point) {
     // Only a command about the background/inverse may pick a mask covering most of the frame.
-    const res = await segmentPointed(frame, point, select.invert);
+    // AI mask (vision + SAM, see aiMask.ts) if it arrives within 5s, else the MediaPipe one.
+    const ai = getAiMask() === "always" ? await aiSegmentWithin(frame, point, select.invert) : null;
+    const res = ai ?? (await segmentPointed(frame, point, select.invert));
     base = res.mask;
     usedPoint = true;
-    label = res.source === "fallback" ? "pointed (fallback)" : "pointed";
-    notes.push(res.source + (res.note ? ` (${res.note})` : ""));
+    if (ai) label = ai.name ? `${ai.name} (${ai.source})` : ai.source === "fallback" ? "pointed (fallback)" : "pointed";
+    else label = res.source === "fallback" ? "pointed (fallback)" : "pointed";
+    notes.push(ai ? `ai ${ai.source} ${ai.ms}ms (${ai.note})` : res.source + (res.note ? ` (${res.note})` : "") + (getAiMask() === "always" ? " · ai mask timed out" : ""));
   } else if (current) {
     base = current.mask;
     label = current.label;
