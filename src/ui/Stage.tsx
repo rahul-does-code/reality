@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
-import { resolveSelection, segmentPointed } from "../vision/select";
+import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
 import { bbox, feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
@@ -33,6 +33,22 @@ export default function Stage() {
   // Mirrors of state that async flows (voice, hand) read after awaits.
   const alphaRef = useRef<Float32Array | null>(null);
   const maskRef = useRef<Uint8Array | null>(null); // binary selection behind alphaRef, for refines
+  // The selection before any inversion ("the background" is its inverse), what it is, and how it was made.
+  const subjectRef = useRef<Uint8Array | null>(null);
+  const labelRef = useRef<string | null>(null);
+  const sourceRef = useRef<string | null>(null);
+  // The last edit actually applied: enough to undo it and redo it on a narrower selection
+  // ("only the top half"). after = the frame it produced (it's only scoped while still showing).
+  const appliedRef = useRef<{
+    op: "recolor" | "blur" | "remove" | "replace";
+    color?: string;
+    intensity?: number;
+    prompt?: string;
+    what?: string;
+    before: ImageData;
+    after: ImageData;
+    sel: NonNullable<CurrentSelection>;
+  } | null>(null);
   const pointRef = useRef<Point | null>(null);
   const segPromiseRef = useRef<Promise<void> | null>(null);
   // Last blur: the frame it was applied on, its mask, and every frame it produced, so an
@@ -129,6 +145,9 @@ export default function Stage() {
     reqId.current++; // invalidate any in-flight segmentation
     alphaRef.current = null;
     maskRef.current = null;
+    subjectRef.current = null;
+    labelRef.current = null;
+    sourceRef.current = null;
     pointRef.current = null;
     segPromiseRef.current = null;
     setPoint(null);
@@ -150,6 +169,7 @@ export default function Stage() {
     historyRef.current.reset(ctx.getImageData(0, 0, canvas.width, canvas.height));
     setDepth(0);
     clearSelection();
+    appliedRef.current = null;
     setFrozen(true);
   }, [clearSelection]);
 
@@ -157,6 +177,7 @@ export default function Stage() {
     historyRef.current.clear();
     setDepth(0);
     clearSelection();
+    appliedRef.current = null;
     setFrozen(false);
   }, [clearSelection]);
 
@@ -184,6 +205,9 @@ export default function Stage() {
       if (id !== reqId.current) return; // a newer click or a resume superseded this one
       const a = feather(res.mask, original.width, original.height, 3);
       maskRef.current = res.mask;
+      subjectRef.current = res.mask;
+      labelRef.current = "pointed";
+      sourceRef.current = "click";
       alphaRef.current = a;
       setAlpha(a);
       setSegInfo(`${res.source} · ${Math.round(res.ms)}ms${res.note ? ` · ${res.note}` : ""}`);
@@ -229,26 +253,40 @@ export default function Stage() {
     setDepth(historyRef.current.depth);
   }, []);
 
+  /** Remember an applied edit with the selection it used (see appliedRef). */
+  const recordEdit = useCallback(
+    (e: { op: "recolor" | "blur" | "remove" | "replace"; color?: string; intensity?: number; prompt?: string; what?: string }, before: ImageData) => {
+      const mask = maskRef.current;
+      const after = historyRef.current.current;
+      if (!mask || !after) return;
+      const sel = { mask, subject: subjectRef.current ?? mask, label: labelRef.current ?? "selection" };
+      appliedRef.current = { ...e, before, after, sel };
+    },
+    [],
+  );
+
   const recolorWith = useCallback(
     (c: string): boolean => {
       const cur = historyRef.current.current;
       const a = alphaRef.current;
       if (!canvasRef.current || !cur || !a) return false;
       pushFrame(recolor(cur, a, c));
+      recordEdit({ op: "recolor", color: c }, cur);
       return true;
     },
-    [pushFrame],
+    [pushFrame, recordEdit],
   );
 
   const blurWith = useCallback(
     (base: ImageData, a: Float32Array, intensity: number) => {
       const out = blurMasked(base, a, intensity);
       pushFrame(out);
+      recordEdit({ op: "blur", intensity }, base);
       const prev = lastBlurRef.current;
       if (prev && prev.base === base && prev.alpha === a) prev.results.push(out);
       else lastBlurRef.current = { base, alpha: a, results: [out] };
     },
-    [pushFrame],
+    [pushFrame, recordEdit],
   );
 
   const showEditError = useCallback((msg: string) => {
@@ -290,6 +328,7 @@ export default function Stage() {
         if (historyRef.current.current !== base) return "frame changed during the edit; result discarded";
         // Final composite goes under the dimmed layer, which then fades out: a crossfade.
         pushFrame(composite(base, edited, a));
+        recordEdit({ op, prompt, what }, base);
         timeline?.mark("composited");
         edited.close();
         return op === "remove" ? "removed" : "replaced";
@@ -309,10 +348,32 @@ export default function Stage() {
         setPendingOn(false); // CSS transition fades the dimmed layer out over CROSSFADE_MS
       }
     },
-    [pushFrame, blurWith, showEditError],
+    [pushFrame, blurWith, showEditError, recordEdit],
   );
 
   const applyRecolor = useCallback(() => recolorWith(color), [recolorWith, color]);
+
+  /**
+   * The one place a resolved selection reaches the screen: mask, overlay, label chip and marker
+   * all describe `sel`. The marker/point survive only if the mask was segmented at that point.
+   */
+  const applySelection = useCallback((sel: Selection, original: ImageData, how: string) => {
+    maskRef.current = sel.mask;
+    subjectRef.current = sel.subject;
+    labelRef.current = sel.label;
+    sourceRef.current = `${how}${sel.source === "selection" ? " (on current selection)" : ""}`;
+    alphaRef.current = sel.alpha;
+    setAlpha(sel.alpha);
+    setSegInfo(`select · ${sel.note}`);
+    const { width: w, height: h } = original;
+    const b = bbox(sel.mask, w, h);
+    setSelTag(sel.label !== "pointed" && b ? { text: sel.label, x: (b.x + b.w / 2) / w, y: b.y / h } : null);
+    if (!sel.usedPoint) {
+      pointRef.current = null;
+      segPromiseRef.current = null;
+      setPoint(null);
+    }
+  }, []);
 
   // Executes a parsed command and returns a short status for the voice line.
   const dispatch = useCallback(
@@ -324,38 +385,67 @@ export default function Stage() {
             ? "point at (click) an object first"
             : null;
       // An edit on a named target with no select is looked up by name too, never applied to
-      // whatever happens to be selected.
+      // whatever happens to be selected ("background" means the inverse of the selection).
+      const parsed =
+        // "only the handle" sometimes arrives as source pointed + a name: it's a named part.
+        cmd.select?.refine === "only" && cmd.select.source === "pointed" && cmd.select.name
+          ? { ...cmd.select, source: "named" as const }
+          : cmd.select;
       const select: Select | null =
-        cmd.select ??
+        parsed ??
         (cmd.target === "named" && cmd.target_name && ["recolor", "blur", "remove", "replace"].includes(cmd.op)
-          ? { source: "named", name: cmd.target_name, face_part: null, region: null, refine: null }
+          ? cmd.target_name.trim().toLowerCase() === "background"
+            ? { source: "background", name: null, face_part: null, region: null, refine: null, invert: false }
+            : { source: "named", name: cmd.target_name, face_part: null, region: null, refine: null, invert: false }
           : null);
-      // A voice `select` replaces the current selection before the op runs on it. On failure
-      // (e.g. a name that isn't found) nothing changes: no edit, and the old selection stays.
-      if (select && cmd.op !== "undo" && cmd.op !== "retry") {
-        const original = historyRef.current.original;
-        if (!original) return "freeze the frame first (Space)";
+      if (select?.refine === "clear") {
+        clearSelection();
+        return "selection cleared";
+      }
+      const original = historyRef.current.original;
+      const current = (): CurrentSelection =>
+        maskRef.current
+          ? { mask: maskRef.current, subject: subjectRef.current ?? maskRef.current, label: labelRef.current ?? "selection" }
+          : null;
+
+      // "only the top half" right after an edit (and no new op): undo that edit, narrow the
+      // selection it used, and redo the same edit with the same parameters on the narrower one.
+      const last = appliedRef.current;
+      if (cmd.op === "select" && select?.refine === "only" && original && last && historyRef.current.current === last.after) {
         const id = ++reqId.current;
         setBusy(true);
-        const sel = await resolveSelection(select, original, pointRef.current, maskRef.current);
+        // Narrow the edit's own mask: a stored point would re-segment, a name is looked up afresh.
+        const narrowPoint = select.source === "pointed" ? null : pointRef.current;
+        const sel = await resolveSelection({ ...select, refine: null }, original, narrowPoint, last.sel);
         if (id !== reqId.current) return "selection superseded by a new point";
         setBusy(false);
         if ("error" in sel) return sel.error;
-        maskRef.current = sel.mask;
-        alphaRef.current = sel.alpha;
-        setAlpha(sel.alpha);
-        setSegInfo(`select · ${sel.note}`);
-        const { width: w, height: h } = original;
-        const b = bbox(sel.mask, w, h);
-        const at = b ? { x: (b.x + b.w / 2) / w, y: b.y / h } : null;
-        if (sel.label === "selection") setSelTag((t) => (t && at ? { ...t, ...at } : t));
-        else setSelTag(sel.label !== "pointed" && at ? { text: sel.label, ...at } : null);
-        if (select.source === "named") {
-          // The mask now comes from the name, so the old point no longer describes the selection.
-          pointRef.current = null;
-          segPromiseRef.current = null;
-          setPoint(null);
-        }
+        while (historyRef.current.current !== last.before && historyRef.current.canUndo) historyRef.current.undo();
+        if (historyRef.current.current !== last.before) return "couldn't undo the last edit to narrow it";
+        canvasRef.current?.getContext("2d")!.putImageData(last.before, 0, 0);
+        setDepth(historyRef.current.depth);
+        applySelection(sel, original, "scope");
+        timeline?.mark("selection resolved");
+        let result: string;
+        if (last.op === "recolor") result = recolorWith(last.color!) ? `recolored ${last.color}` : "recolor failed";
+        else if (last.op === "blur") {
+          blurWith(last.before, alphaRef.current!, last.intensity ?? DEFAULT_BLUR);
+          result = `blurred ${Math.round((last.intensity ?? DEFAULT_BLUR) * 100)}%`;
+        } else result = await modelOp(last.op, last.prompt ?? "", last.what ?? "that", timeline);
+        return `redid the last edit on ${sel.label}: ${result}`;
+      }
+
+      // A voice `select` replaces the current selection before the op runs on it. On failure
+      // (e.g. a name that isn't found) nothing changes: no edit, and the old selection stays.
+      if (select && cmd.op !== "undo" && cmd.op !== "retry") {
+        if (!original) return "freeze the frame first (Space)";
+        const id = ++reqId.current;
+        setBusy(true);
+        const sel = await resolveSelection(select, original, pointRef.current, current());
+        if (id !== reqId.current) return "selection superseded by a new point";
+        setBusy(false);
+        if ("error" in sel) return sel.error;
+        applySelection(sel, original, select.source);
         timeline?.mark("selection resolved");
         if (cmd.op === "select") {
           if (!isRetry) lastEditRef.current = cmd;
@@ -417,11 +507,22 @@ export default function Stage() {
         }
       }
     },
-    [undo, recolorWith, blurWith, modelOp],
+    [undo, recolorWith, blurWith, modelOp, clearSelection, applySelection],
   );
   // The parse is async, so call through a ref to get the dispatch with current state.
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
+
+  // Dev log after every command: what the overlay shows and edits will use.
+  const logSelection = useCallback((what: string) => {
+    const mask = maskRef.current;
+    const original = historyRef.current.original;
+    const b = mask && original ? bbox(mask, original.width, original.height) : null;
+    console.log(
+      `[sel] ${JSON.stringify(what)}: source=${sourceRef.current ?? "none"} label=${labelRef.current ?? "none"} ` +
+        `bbox=${b ? `${b.x},${b.y} ${b.w}x${b.h}` : "none"} point=${pointRef.current ? `${Math.round(pointRef.current.x)},${Math.round(pointRef.current.y)}` : "none"}`,
+    );
+  }, []);
 
   const runCommand = useCallback(async (transcript: string, timeline: Timeline) => {
     if (!transcript) {
@@ -450,6 +551,7 @@ export default function Stage() {
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
       setVoiceStatus(`"${transcript}" → ${detail} · working...`);
       const result = await dispatchRef.current(command, false, timeline);
+      logSelection(transcript);
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
       setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
     } catch (e) {
@@ -617,12 +719,13 @@ export default function Stage() {
       if (e.code === "Space") {
         e.preventDefault();
         frozen ? resume() : freeze();
-      } else if (e.key.toLowerCase() === "u") undo();
+      } else if (e.key === "Escape") clearSelection();
+      else if (e.key.toLowerCase() === "u") undo();
       else if (e.key.toLowerCase() === "r") applyRecolor();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [frozen, freeze, resume, undo, applyRecolor]);
+  }, [frozen, freeze, resume, undo, applyRecolor, clearSelection]);
 
   const readout = !frozen
     ? handMode
@@ -742,6 +845,9 @@ export default function Stage() {
         </button>
         <button onClick={applyRecolor} disabled={!frozen || !alpha || busy}>
           Recolor (R)
+        </button>
+        <button onClick={clearSelection} disabled={!alpha && !point}>
+          Clear selection (Esc)
         </button>
         <input
           type="color"

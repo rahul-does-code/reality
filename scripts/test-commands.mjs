@@ -32,7 +32,7 @@ const UTTERANCES = [
   "do it again",
   "undo",
   "turn the mug baby blue",
-  "blur the background",
+  ["blur the background", (c) => c.op === "blur" && c.select?.source === "background" && !c.select.invert],
   "less",
   "get rid of this",
   "replace that with a potted cactus",
@@ -44,6 +44,15 @@ const UTTERANCES = [
   ["select the tree", (c) => c.op === "select" && c.select?.source === "named" && c.select.name === "tree"],
   ["a bit bigger", (c) => c.op === "select" && c.select?.refine === "grow"],
   ["make the left third of this red", (c) => c.op === "recolor" && c.select?.region?.side === "left" && Math.abs(c.select.region.fraction - 0.33) < 0.02],
+  // Background / invert, deselect, and scoping the last edit.
+  ["blur everything except the bottle", (c) => c.op === "blur" && c.select?.source === "named" && /bottle/.test(c.select.name ?? "") && c.select.invert === true],
+  ["deselect", (c) => c.op === "select" && c.select?.refine === "clear"],
+  ["clear selection", (c) => c.op === "select" && c.select?.refine === "clear"],
+  ["never mind", (c) => c.op === "select" && c.select?.refine === "clear"],
+  ["make that red", (c) => c.op === "recolor" && !c.select?.refine],
+  ["only the top half", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "top" && c.select.region.fraction === 0.5],
+  ["just the left side", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "left"],
+  ["only the handle", (c) => c.op === "select" && c.select?.refine === "only" && c.select.source === "named" && /handle/.test(c.select.name ?? "")],
 ];
 
 /** Runs every utterance with the given provider override; returns one row per utterance. */

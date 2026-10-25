@@ -128,6 +128,7 @@ Examples:
 - "just the left side" (previous op recolor) -> op select, select {source pointed, region {side left, fraction 0.5}, refine only}
 - "blur the background" -> op blur, target named, target_name "background", intensity 0.6, select {source background, invert false}
 - "blur everything except the bottle" -> op blur, target named, target_name "bottle", intensity 0.6, select {source named, name "bottle", invert true}
+- "only the handle" (previous op recolor on a mug) -> op select, target named, target_name "mug handle", select {source named, name "mug handle", refine only}
 - "deselect" / "never mind" -> op select, select {source pointed, refine clear}
 - "select the tree" -> op select, target named, target_name "tree", select {source named, name "tree"}
 - "a bit bigger" (previous select {source named, name "tree"}) -> op select, select {source named, name "tree", refine grow}`;
@@ -230,6 +231,9 @@ function shouldFallback(e: unknown): boolean {
 
 function errorMessage(e: unknown): string {
   if (isTimeout(e)) return `timed out after ${COMMAND_TIMEOUT_MS / 1000}s`;
+  // fetch() reports network failures as TypeError("fetch failed") with the reason in .cause.
+  const cause = e instanceof TypeError ? (e.cause as { code?: string; message?: string } | undefined) : undefined;
+  if (cause) return `${e instanceof Error ? e.message : String(e)} (${cause.code ?? cause.message ?? "unknown cause"})`;
   return e instanceof Error ? e.message : String(e);
 }
 
