@@ -144,6 +144,7 @@ Output format: reply with exactly one JSON object with the keys op, target, targ
 const app = express();
 app.use(cors());
 const imageJson = express.json({ limit: "8mb" });
+app.use((await import("./routes/transcribe")).transcribeRouter); // POST /api/transcribe (Muse Voice)
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, model: MODEL, segmentModel: SEGMENT_MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
