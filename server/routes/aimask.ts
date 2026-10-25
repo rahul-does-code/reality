@@ -11,7 +11,7 @@
 // Measured on a 1280x720 webcam frame: SAM 0.8-2.3s, zero matches = 200 with empty text.
 import express, { Router } from "express";
 import { decodeMaskToRaster, parseImageStream, recordsOfKind } from "@meta-sam/parser";
-import { gemini429Recently, noteGeminiStatus } from "../geminiCooldown.js";
+import { gemini429Recently, noteGeminiStatus } from "../geminiCooldown";
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";

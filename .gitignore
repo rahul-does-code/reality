@@ -4,4 +4,3 @@ public/mediapipe-wasm
 public/models
 .env
 .DS_Store
-.vercel

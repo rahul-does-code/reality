@@ -16,13 +16,13 @@ import {
   type NamedInstance,
   type SegmentNamedRequest,
   type SegmentNamedResponse,
-} from "../src/commands/schema.js";
-import { noteGeminiStatus } from "./geminiCooldown.js";
+} from "../src/commands/schema";
+import { noteGeminiStatus } from "./geminiCooldown";
 
-// server/vercel.ts sets PROXY_EMBEDDED=1 to mount this app behind its own CORS and rate limits (no listen).
+// deploy/server.ts sets PROXY_EMBEDDED=1 to mount this app behind its own CORS, rate limits and dist/ serving.
 const EMBEDDED = process.env.PROXY_EMBEDDED === "1";
 // Starts the glasses frame relay on :8788 (ws ingest + MJPEG); GLASSES_RELAY=off skips it.
-if (process.env.GLASSES_RELAY !== "off") await import("./routes/glassesRelay.js");
+if (process.env.GLASSES_RELAY !== "off") await import("./routes/glassesRelay");
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -154,9 +154,9 @@ Output format: reply with exactly one JSON object with the keys op, target, targ
 export const app = express();
 if (!EMBEDDED) app.use(cors());
 const imageJson = express.json({ limit: "8mb" });
-app.use((await import("./routes/transcribe.js")).transcribeRouter); // POST /api/transcribe (Muse Voice)
-app.use((await import("./routes/aimask.js")).aimaskRouter); // POST /api/aimask (vision + SAM 3.1 for pointed masks)
-app.use((await import("./routes/samtext.js")).samTextRouter); // POST /api/segment-text (SAM 3.1 text prompt, clothing)
+app.use((await import("./routes/transcribe")).transcribeRouter); // POST /api/transcribe (Muse Voice)
+app.use((await import("./routes/aimask")).aimaskRouter); // POST /api/aimask (vision + SAM 3.1 for pointed masks)
+app.use((await import("./routes/samtext")).samTextRouter); // POST /api/segment-text (SAM 3.1 text prompt, clothing)
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, model: MODEL, segmentModel: SEGMENT_MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });

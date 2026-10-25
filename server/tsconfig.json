@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["proxy.ts", "vercel.ts", "../api/*.ts", "../src/commands/schema.ts"]
+  "include": ["proxy.ts", "../src/commands/schema.ts"]
 }
