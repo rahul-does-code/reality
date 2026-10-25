@@ -1,6 +1,7 @@
 // Tiny API proxy so API keys (GEMINI_API_KEY, META_API_KEY) stay server-side. Vite proxies /api/* here in dev.
 // Run: npx tsx server/proxy.ts   (or `npm run dev:all` for this + Vite)
 import "dotenv/config";
+import "./routes/glassesRelay"; // starts the glasses frame relay on :8788 (ws ingest + MJPEG)
 import express from "express";
 import cors from "cors";
 import {

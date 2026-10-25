@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Glasses debug</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; padding: 16px; background: #111; color: #ddd; font: 14px/1.4 system-ui, sans-serif; }
+      .row { display: flex; gap: 16px; flex-wrap: wrap; }
+      figure { margin: 0; flex: 1 1 320px; max-width: 640px; }
+      figure > img, figure > video { width: 100%; background: #000; border-radius: 6px; display: block; min-height: 120px; }
+      figcaption { margin-top: 6px; font-variant-numeric: tabular-nums; }
+      code { color: #9cf; }
+      #err { color: #f88; }
+    </style>
+  </head>
+  <body>
+    <p>
+      Relay: <code id="relay"></code> &middot; phones connected: <b id="phones">?</b> &middot;
+      relay fps in: <b id="fpsIn">?</b> &middot; frames: <b id="count">?</b>
+    </p>
+    <div class="row">
+      <figure>
+        <img id="mjpeg" alt="MJPEG stream" />
+        <figcaption>MJPEG <code>/glasses/stream.mjpg</code></figcaption>
+      </figure>
+      <figure>
+        <video id="video" muted playsinline></video>
+        <figcaption>
+          <code>startGlassesSource(video)</code> (what the app sees): <b id="fps">-</b> fps,
+          <span id="size">-</span> <span id="err"></span>
+        </figcaption>
+      </figure>
+    </div>
+    <script type="module">
+      import { startGlassesSource, glassesStats, GLASSES_RELAY_PORT } from "/src/input/glassesSource.ts";
+
+      const base = `${location.protocol}//${location.hostname}:${GLASSES_RELAY_PORT}`;
+      const $ = (id) => document.getElementById(id);
+      $("relay").textContent = base;
+      $("mjpeg").src = `${base}/glasses/stream.mjpg`;
+
+      const video = $("video");
+      async function start() {
+        $("err").textContent = "";
+        try {
+          await startGlassesSource(video);
+        } catch (e) {
+          $("err").textContent = `${e.message} Retrying...`;
+          setTimeout(start, 2000);
+        }
+      }
+      start();
+
+      let lastFrames = 0;
+      setInterval(async () => {
+        const { frames } = glassesStats();
+        $("fps").textContent = String(frames - lastFrames);
+        lastFrames = frames;
+        $("size").textContent = video.videoWidth ? `${video.videoWidth}x${video.videoHeight}` : "-";
+        try {
+          const s = await (await fetch(`${base}/glasses/status`)).json();
+          $("phones").textContent = s.phones;
+          $("fpsIn").textContent = s.fpsIn;
+          $("count").textContent = s.frameCount;
+        } catch {
+          $("phones").textContent = "relay down";
+        }
+      }, 1000);
+    </script>
+  </body>
+</html>
