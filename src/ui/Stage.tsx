@@ -18,7 +18,8 @@ import { editTimeoutMs, maskDataUrl } from "../edit/modelEdit";
 import { Timeline } from "../commands/timeline";
 
 const CROSSFADE_MS = 400;
-import { PushToTalk, speechSupported } from "../input/speech";
+import { speechSupported } from "../input/speech";
+import { createPushToTalk, MusePushToTalk, voiceSupported, type PushToTalkLike, type VoiceEngine } from "../input/museVoice";
 import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
 import { emitMouse, pointer, usePointerSamples } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
@@ -87,7 +88,9 @@ export default function Stage() {
   const [mirror, setMirror] = useState(true);
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
-  const pttRef = useRef<PushToTalk | null>(null);
+  const pttRef = useRef<PushToTalkLike | null>(null);
+  // Voice source: Web Speech in the browser, or Muse Voice Transcribe (falls back to Web Speech).
+  const [voiceEngine, setVoiceEngine] = useState<VoiceEngine>("webspeech");
   const lastEditRef = useRef<Command | null>(null); // context for "less"/"again", sent as `previous`
   const [listening, setListening] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState(
@@ -619,13 +622,15 @@ export default function Stage() {
     );
   }, []);
 
-  const runCommand = useCallback(async (transcript: string, timeline: Timeline) => {
+  // heard: which recognizer answered and how fast, e.g. "muse 640ms" (empty for typed commands).
+  const runCommand = useCallback(async (transcript: string, timeline: Timeline, heard = "") => {
+    const h = heard ? `[${heard}] ` : "";
     if (!transcript) {
-      setVoiceStatus("didn't catch that");
+      setVoiceStatus(`${h}didn't catch that`);
       return;
     }
     timeline.setLabel(JSON.stringify(transcript));
-    setVoiceStatus(`"${transcript}" · parsing...`);
+    setVoiceStatus(`${h}"${transcript}" · parsing...`);
     try {
       // Frozen: Gemini also gets the original frame and the pointed position (normalized).
       const original = historyRef.current.original;
@@ -644,21 +649,21 @@ export default function Stage() {
         timeline.mark("mask ready");
       }
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
-      setVoiceStatus(`"${transcript}" → ${detail} · working...`);
+      setVoiceStatus(`${h}"${transcript}" → ${detail} · working...`);
       const result = await dispatchRef.current(command, false, timeline);
       logSelection(transcript);
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
-      setVoiceStatus(`"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
+      setVoiceStatus(`${h}"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
     } catch (e) {
-      setVoiceStatus(`"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
+      setVoiceStatus(`${h}"${transcript}" · error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       timeline.print();
     }
   }, []);
 
   const startTalking = useCallback(() => {
-    if (!speechSupported() || pttRef.current?.listening) return;
-    pttRef.current ??= new PushToTalk((t) => setVoiceStatus(`listening... "${t}"`));
+    if (!voiceSupported(voiceEngine) || pttRef.current?.listening) return;
+    pttRef.current ??= createPushToTalk(voiceEngine, (t) => setVoiceStatus(`listening... "${t}"`));
     try {
       pttRef.current.start();
       setListening(true);
@@ -666,17 +671,38 @@ export default function Stage() {
     } catch (e) {
       setVoiceStatus(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [voiceEngine]);
+
+  // Switching the voice source drops the old recognizer (and its open mic).
+  useEffect(() => {
+    pttRef.current?.cancel();
+    pttRef.current = null;
+    setListening(false);
+  }, [voiceEngine]);
 
   const stopTalking = useCallback(async () => {
     const ptt = pttRef.current;
     if (!ptt?.listening) return;
     setListening(false);
     const timeline = new Timeline("voice", "speech end");
+    const t0 = performance.now();
     try {
-      const transcript = await ptt.stop();
+      let transcript: string;
+      let heard: string;
+      if (ptt instanceof MusePushToTalk) {
+        const r = await ptt.stopDetailed();
+        transcript = r.text;
+        heard = `${r.path === "muse" ? "muse" : "web speech (muse failed)"} ${r.ms}ms`;
+        if (r.error) {
+          console.warn("[voice] muse failed, used web speech:", r.error);
+          if (r.path === "muse") throw r.error; // no Web Speech to fall back to
+        }
+      } else {
+        transcript = await ptt.stop();
+        heard = `web speech ${Math.round(performance.now() - t0)}ms`;
+      }
       timeline.mark("transcript");
-      void runCommand(transcript, timeline);
+      void runCommand(transcript, timeline, heard);
     } catch (e) {
       setVoiceStatus(e instanceof Error ? e.message : String(e));
     }
@@ -1009,7 +1035,7 @@ export default function Stage() {
       <div className="voice">
         <button
           className={listening ? "mic on" : "mic"}
-          disabled={!speechSupported()}
+          disabled={!voiceSupported(voiceEngine)}
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture(e.pointerId);
             pttDown();
@@ -1034,6 +1060,13 @@ export default function Stage() {
             />
           </form>
         )}
+        <label className="check" title="Speech recognizer. Muse falls back to Web Speech on any error.">
+          Voice
+          <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
+            <option value="webspeech">Web Speech</option>
+            <option value="muse">Muse</option>
+          </select>
+        </label>
         <span className="voice-status">{voiceStatus}</span>
       </div>
     </div>
