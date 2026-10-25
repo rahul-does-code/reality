@@ -16,6 +16,7 @@ import { removeObject } from "../edit/remove";
 import { replaceObject } from "../edit/replace";
 import { editTimeoutMs, maskDataUrl } from "../edit/modelEdit";
 import { Timeline } from "../commands/timeline";
+import { LiveRecolor } from "../edit/liveRecolor";
 
 const CROSSFADE_MS = 400;
 import { speechSupported } from "../input/speech";
@@ -727,6 +728,42 @@ export default function Stage() {
     startTalking();
   }, [handMode, freeze, runSegment, startTalking]);
 
+  // Live recolor on the unfrozen view: recolors whatever the finger (or the hovering mouse) points
+  // at, in the current color. Runs only while live; freezing or resuming tears it down.
+  const liveRef = useRef<LiveRecolor | null>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [liveOn, setLiveOn] = useState(false);
+  const [liveInfo, setLiveInfo] = useState("");
+  const colorRef = useRef(color);
+  colorRef.current = color;
+  useEffect(() => {
+    if (!liveOn || frozen) return;
+    const live = (liveRef.current ??= new LiveRecolor());
+    const present = (src: "finger" | "mouse") => {
+      const s = pointer.latest(src);
+      return s?.handPresent ? s : null;
+    };
+    const getPoint = () => {
+      const f = present("finger");
+      const m = present("mouse");
+      const s = f && m ? (f.t >= m.t ? f : m) : (f ?? m);
+      return s ? { x: s.x, y: s.y } : null;
+    };
+    live.start(videoRef.current!, getPoint, colorRef.current, liveCanvasRef.current!);
+    // Both fps side by side, so a live-recolor cost on hand tracking shows up immediately.
+    const id = window.setInterval(() => {
+      const st = live.stats;
+      const hand = trackerRef.current?.stats();
+      setLiveInfo(`live ${st.fps} fps · render ${st.renderMs}ms · seg ${st.segMs}ms${hand ? ` · hand ${hand.fps} fps` : ""}`);
+    }, 500);
+    return () => {
+      clearInterval(id);
+      live.stop();
+      setLiveInfo("");
+    };
+  }, [liveOn, frozen]);
+  useEffect(() => liveRef.current?.setColor(color), [color]);
+
   // Fingertip tracking runs only while hand mode is on; it feeds the pointer samples above.
   useEffect(() => {
     if (!handMode) return;
@@ -875,6 +912,14 @@ export default function Stage() {
               setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })
             }
           />
+          {/* Live recolor output; the hovering mouse is its pointer (same samples as on the frozen frame). */}
+          <canvas
+            ref={liveCanvasRef}
+            className="layer"
+            style={{ display: liveOn && !frozen ? "block" : "none" }}
+            onMouseMove={(e) => emitMouse(e, e.currentTarget, size.w, size.h, true, mirror)}
+            onMouseLeave={(e) => emitMouse(e, e.currentTarget, size.w, size.h, false, mirror)}
+          />
           <canvas
             ref={canvasRef}
             className="layer"
@@ -953,6 +998,7 @@ export default function Stage() {
         <div className="badge badge-right">
           model: {modelState}
           {handMode && ` · hand: ${handStatus === "ready" ? (handSeen ? "tracking" : "no hand") : handStatus}`}
+          {liveInfo && ` · ${liveInfo}`}
         </div>
       </div>
 
@@ -1011,6 +1057,10 @@ export default function Stage() {
             </label>
           </>
         )}
+        <label className="check" title="Recolor the pointed object on the live video (finger or mouse hover)">
+          <input type="checkbox" checked={liveOn} onChange={(e) => setLiveOn(e.target.checked)} />
+          Live recolor
+        </label>
         <label className="check">
           <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />
           Show mask
