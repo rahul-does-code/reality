@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
+import { initFace } from "../vision/face";
 import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
 import { bbox, feather, type Point } from "../vision/mask";
@@ -118,6 +119,11 @@ export default function Stage() {
         setModelState("failed");
         setSegInfo(`model failed: ${e instanceof Error ? e.message : String(e)} (circle fallback active)`);
       });
+  }, []);
+
+  // Preload FaceLandmarker so the first "change my nose" doesn't wait on the model download.
+  useEffect(() => {
+    initFace().catch((e) => console.warn("[face] init failed", e));
   }, []);
 
   // Start / switch camera

@@ -3,6 +3,7 @@ import type { NamedInstance, Select, SelectSource, SegmentNamedResponse } from "
 import { segmentAt, type SegResult } from "./segmenter";
 import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
+import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
 
 /**
  * mask: what edits apply to. subject: the same before any inversion, so "the background" is always
@@ -202,7 +203,13 @@ export async function resolveSelection(
     source = "selection";
     inverted = false; // grow/shrink what is selected now, inverted or not
   } else if (select.source === "face_part") {
-    return { error: `face parts aren't supported yet (${select.face_part ?? "face"})` };
+    const part = select.face_part ?? "face";
+    if (!MESH_PARTS.includes(part as MeshPart)) return { error: `"${part}" isn't a supported face part yet` };
+    const m = await faceMask(frame, part as MeshPart, w, h); // largest face
+    if (!m || coverage(m) === 0) return { error: "No face found" };
+    base = m;
+    label = `${part.replace("_", " ")} (face)`;
+    notes.push("face landmarks");
   } else if (select.source === "background") {
     if (!current) return { error: "Point at the subject first, then say 'blur the background'" };
     base = current.subject;
