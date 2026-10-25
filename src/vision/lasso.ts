@@ -1,8 +1,8 @@
 // Stroke -> mask. A closed stroke is a lasso (polygon fill); an open stroke is a scribble prompt for
 // the MediaPipe interactive segmenter. Both fall back to the polygon or a thin dilated stroke so a
 // gesture always selects something. Pure mask math except segmentScribble.
-import { initSegmenter, type SegResult } from "./segmenter";
-import { binarize, componentAt, coverage, dilate, invert, type Point } from "./mask";
+import { initSegmenter, MAX_POINT_COVERAGE, type SegResult } from "./segmenter";
+import { binarize, componentAt, coverage, dilate, type Point } from "./mask";
 
 export type CombineMode = "replace" | "add" | "subtract";
 
@@ -154,18 +154,21 @@ function strokeFallback(points: Point[], w: number, h: number): Uint8Array {
 
 /**
  * Segment the object(s) under a scribble (frame px points) with the interactive segmenter.
- * Same post-processing as segmentAt: binarize, try as-is then inverted, keep blobs under the
- * scribble, reject implausible coverage. Never throws: falls back to strokeFallback.
+ * Same post-processing as segmentAt (binarize, keep blobs under the scribble, reject implausible
+ * coverage) and never an inverted mask. Never throws: falls back to strokeFallback.
  */
 export async function segmentScribble(frame: ImageData, points: Point[]): Promise<SegResult> {
   const t0 = performance.now();
   const { width: w, height: h } = frame;
-  const fallback = (note: string): SegResult => ({
-    mask: strokeFallback(points, w, h),
-    source: "fallback",
+  const result = (mask: Uint8Array, source: SegResult["source"], note?: string): SegResult => ({
+    mask,
+    source,
     ms: performance.now() - t0,
     note,
+    coverage: coverage(mask),
+    inside: true, // the mask comes from the stroke itself, not from a single point
   });
+  const fallback = (note: string): SegResult => result(strokeFallback(points, w, h), "fallback", note);
   if (!points.length) return fallback("empty stroke");
 
   try {
@@ -180,21 +183,19 @@ export async function segmentScribble(frame: ImageData, points: Point[]): Promis
         // Copy inside the callback: the buffer is only valid until it returns.
         const conf = m.getAsFloat32Array().slice();
         const bin = binarize(conf, m.width, m.height, w, h);
-        for (const cand of [bin, invert(bin)]) {
-          const blob = componentsAt(cand, w, h, probes);
-          if (!blob) continue;
-          const cov = coverage(blob);
-          if (cov >= 0.002 && cov <= 0.8) {
-            picked = blob;
-            return;
-          }
-          note = `mask coverage ${(cov * 100).toFixed(1)}% out of range`;
+        const blob = componentsAt(bin, w, h, probes);
+        if (!blob) continue;
+        const cov = coverage(blob);
+        if (cov >= 0.002 && cov <= MAX_POINT_COVERAGE) {
+          picked = blob;
+          return;
         }
+        note = `mask coverage ${(cov * 100).toFixed(1)}% out of range`;
       }
     });
 
     if (!picked) return fallback(note);
-    return { mask: picked, source: "model", ms: performance.now() - t0 };
+    return result(picked, "model");
   } catch (e) {
     return fallback(e instanceof Error ? e.message : String(e));
   }
@@ -212,8 +213,17 @@ export async function selectStroke(frame: ImageData, points: Point[]): Promise<S
   if (isClosed(points)) {
     const t0 = performance.now();
     const poly = fillPolygon(points, w, h);
-    if (coverage(poly) > 0) return { kind: "lasso", mask: poly, source: "lasso", ms: performance.now() - t0 };
-    return { kind: "lasso", mask: strokeMask(points, w, h), source: "fallback", ms: performance.now() - t0, note: "degenerate lasso" };
+    const done = (mask: Uint8Array, source: StrokeSelection["source"], note?: string): StrokeSelection => ({
+      kind: "lasso",
+      mask,
+      source,
+      ms: performance.now() - t0,
+      note,
+      coverage: coverage(mask),
+      inside: true,
+    });
+    if (coverage(poly) > 0) return done(poly, "lasso");
+    return done(strokeMask(points, w, h), "fallback", "degenerate lasso");
   }
   return { kind: "scribble", ...(await segmentScribble(frame, points)) };
 }

@@ -25,13 +25,13 @@ export type Selection = {
 export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: string } | null;
 
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
-let last: { frame: ImageData; x: number; y: number; job: Promise<SegResult> } | null = null;
+let last: { frame: ImageData; x: number; y: number; allowLarge: boolean; job: Promise<SegResult> } | null = null;
 
 /** segmentAt, memoized on (frame, point). Stage's click path calls this too. */
-export function segmentPointed(frame: ImageData, p: Point): Promise<SegResult> {
-  if (last && last.frame === frame && last.x === p.x && last.y === p.y) return last.job;
-  const job = segmentAt(frame, p);
-  last = { frame, x: p.x, y: p.y, job };
+export function segmentPointed(frame: ImageData, p: Point, allowLarge = false): Promise<SegResult> {
+  if (last && last.frame === frame && last.x === p.x && last.y === p.y && last.allowLarge === allowLarge) return last.job;
+  const job = segmentAt(frame, p, allowLarge);
+  last = { frame, x: p.x, y: p.y, allowLarge, job };
   return job;
 }
 
@@ -227,10 +227,11 @@ export async function resolveSelection(
     notes.push(named.note);
     label = `${name} (named)`;
   } else if (point) {
-    const res = await segmentPointed(frame, point);
+    // Only a command about the background/inverse may pick a mask covering most of the frame.
+    const res = await segmentPointed(frame, point, select.invert);
     base = res.mask;
     usedPoint = true;
-    label = "pointed";
+    label = res.source === "fallback" ? "pointed (fallback)" : "pointed";
     notes.push(res.source + (res.note ? ` (${res.note})` : ""));
   } else if (current) {
     base = current.mask;
@@ -245,7 +246,7 @@ export async function resolveSelection(
     base = applyRegion(base, w, h, side, fraction);
     const part = `${side} ${Math.round(fraction * 100)}%`;
     notes.push(part);
-    label = label === "pointed" ? `pointed, ${part}` : `${label}, ${part}`;
+    label = `${label}, ${part}`;
   }
   if (sizeRefine) {
     const r = refineRadius(base, w, h);

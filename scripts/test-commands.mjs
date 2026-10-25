@@ -53,6 +53,11 @@ const UTTERANCES = [
   ["only the top half", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "top" && c.select.region.fraction === 0.5],
   ["just the left side", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "left"],
   ["add this", (c) => c.op === "select" && c.select?.refine === "add"],
+  ["also this", (c) => c.op === "select" && c.select?.refine === "add"],
+  // "add <new object>" is a new edit (replace + prompt), never selection mode or a scope of the last edit.
+  ["add a butterfly", (c) => c.op === "replace" && !!c.prompt && !c.select?.refine],
+  ["put a butterfly on the window", (c) => c.op === "replace" && !!c.prompt && !c.select?.refine],
+  ["add a butterfly here", (c) => c.op === "replace" && !!c.prompt && !c.select?.refine],
   ["not this part", (c) => c.op === "select" && c.select?.refine === "subtract"],
   ["only the handle", (c) => c.op === "select" && c.select?.refine === "only" && c.select.source === "named" && /handle/.test(c.select.name ?? "")],
 ];

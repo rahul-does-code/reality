@@ -27,6 +27,9 @@ import { emitMouse, pointer, usePointerSamples } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
 import type { Command, Select } from "../commands/schema";
 
+/** recolor/remove/replace refuse a selection covering more than this share of the frame. */
+const MAX_EDIT_COVERAGE = 0.6;
+const TOO_BIG_MSG = "That selection covers most of the picture - point at the object or draw a loop around it.";
 const SWATCHES = ["#ff3ca0", "#e5322d", "#2f6bff", "#22b55e", "#ffd21f", "#8a3ffc"];
 const HINTS = ["make it pink", "blur that", "turn that into a cardboard box", "make the taller one red", "change my nose"];
 
@@ -297,7 +300,8 @@ export default function Stage() {
           if (mode === "subtract") clearSelection();
           return;
         }
-        const label = mode === "replace" ? seg.kind : `${prevLabel} ${mode === "add" ? "+" : "−"} ${seg.kind}`;
+        const kind = seg.source === "fallback" ? `${seg.kind} (fallback)` : seg.kind;
+        const label = mode === "replace" ? kind : `${prevLabel} ${mode === "add" ? "+" : "−"} ${kind}`;
         const usedPoint = g.kind === "click" && mode === "replace";
         if (usedPoint) {
           pointRef.current = g.p;
@@ -428,9 +432,9 @@ export default function Stage() {
   );
 
   /**
-   * remove/replace via the image model. The model sees the clean ORIGINAL frame; its output is
-   * composited into the current frame only inside the mask, so earlier edits elsewhere survive
-   * and everything outside the mask stays pixel-identical. Remove falls back to a heavy blur.
+   * remove/replace via the image model. The model sees the CURRENT frame (earlier edits applied);
+   * its output is composited back into that frame only inside the mask, so earlier edits are never
+   * overwritten and everything outside the mask stays pixel-identical. Remove falls back to a heavy blur.
    */
   const modelOp = useCallback(
     async (op: "remove" | "replace", prompt: string, what: string, timeline?: Timeline): Promise<string> => {
@@ -441,7 +445,7 @@ export default function Stage() {
       if (modelBusyRef.current) return "another edit is still running";
       modelBusyRef.current = true;
       // Fire the request first (modelEdit encodes and sends synchronously); UI feedback after.
-      const request = op === "remove" ? removeObject(original, a, timeline) : replaceObject(original, a, prompt, timeline);
+      const request = op === "remove" ? removeObject(base, a, timeline) : replaceObject(base, a, prompt, timeline);
 
       setToast(null);
       setVoiceStatus(op === "remove" ? `Removing ${what}...` : `Replacing with: ${prompt}`);
@@ -494,6 +498,10 @@ export default function Stage() {
     subjectRef.current = sel.subject;
     labelRef.current = sel.label;
     sourceRef.current = `${how}${sel.source === "selection" ? " (on current selection)" : ""}`;
+    const { width: fw, height: fh } = original;
+    const pt = pointRef.current;
+    const inside = pt ? (sel.mask[Math.min(fh - 1, Math.max(0, Math.round(pt.y))) * fw + Math.min(fw - 1, Math.max(0, Math.round(pt.x)))] ? "inside" : "outside") : "no point";
+    console.log(`[select] source=${sourceRef.current} coverage=${(coverage(sel.mask) * 100).toFixed(1)}% point=${inside}`);
     alphaRef.current = sel.alpha;
     setAlpha(sel.alpha);
     setSegInfo(`select · ${sel.note}`);
@@ -539,6 +547,13 @@ export default function Stage() {
         return `next click or stroke will ${select.refine === "add" ? "add to" : "cut from"} the selection`;
       }
       const original = historyRef.current.original;
+      // A selection covering most of the picture is almost always a bad mask. The background and
+      // "everything except" selections are big on purpose.
+      const tooBig = () => {
+        const m = maskRef.current;
+        if (!m || /^(background|everything except)/.test(labelRef.current ?? "")) return null;
+        return coverage(m) > MAX_EDIT_COVERAGE ? TOO_BIG_MSG : null;
+      };
       const current = (): CurrentSelection =>
         maskRef.current
           ? { mask: maskRef.current, subject: subjectRef.current ?? maskRef.current, label: labelRef.current ?? "selection" }
@@ -603,7 +618,7 @@ export default function Stage() {
         }
         case "recolor": {
           if (!cmd.color || !CSS.supports("color", cmd.color)) return `recolor: bad color "${cmd.color}"`;
-          const missing = needSelection();
+          const missing = needSelection() ?? tooBig();
           if (missing) return missing;
           if (!recolorWith(cmd.color)) return "recolor failed";
           if (/^#[0-9a-f]{6}$/i.test(cmd.color)) setColor(cmd.color);
@@ -632,7 +647,7 @@ export default function Stage() {
         }
         case "remove":
         case "replace": {
-          const missing = needSelection();
+          const missing = needSelection() ?? tooBig();
           if (missing) return missing;
           const prompt = cmd.op === "replace" ? cmd.prompt?.trim() : "";
           if (cmd.op === "replace" && !prompt) return "replace: no prompt from the parser";
