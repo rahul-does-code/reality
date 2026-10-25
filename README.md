@@ -36,7 +36,25 @@ lasso, or draw a line to scribble. Hold V (or the mic button) and speak. U undoe
 F toggles fullscreen. "Hand mode" points with your index finger and pinches to press. "Live recolor"
 recolors what you point at on the moving video.
 
-Debug pages: `/strokes-debug.html`, `/live-debug.html`, `/voice-debug.html`, `/face-debug.html`.
+Debug pages: `/strokes-debug.html`, `/live-debug.html`, `/voice-debug.html`, `/face-debug.html`,
+`/glasses-debug.html`.
+
+## Glasses input
+
+Glasses input: an iPhone app (ios/) takes the camera stream through Meta's Wearables Device Access
+Toolkit using its Mock Device Kit (no real glasses were available) and relays it to the pipeline;
+swapping the webcam for glasses changes nothing downstream.
+
+Run it (full steps in [ios/README.md](ios/README.md)):
+
+1. `npm run dev:all` (the proxy also starts the glasses relay on :8788), then `ipconfig getifaddr en0`
+   for the laptop's IP. Phone and laptop must be on the same Wi-Fi (or the iPhone's hotspot).
+2. Open `ios/GlassesRelay.xcodeproj` in Xcode, let the Meta toolkit package resolve, set your Team and a
+   unique bundle identifier under Signing & Capabilities.
+3. Run on an iPhone (Developer Mode on; trust the developer in Settings if asked), or on a simulator,
+   which plays a bundled test clip instead of the camera (use IP `127.0.0.1`).
+4. In the app, enter the laptop IP and tap Start streaming (allow Camera and Local Network).
+5. In the web app, set Source to "Glasses relay". `/glasses-debug.html` shows the raw relay stream.
 
 ## Architecture
 
