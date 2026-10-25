@@ -1,5 +1,6 @@
 // POST /api/aimask: what is at the pointed spot, then a SAM 3.1 mask for it.
-// 1. Vision: Gemini (then Muse Spark 1.3 on 429/5xx/timeout/bad JSON, as /api/command does) gets the
+// 1. Vision: Gemini (then Muse Spark 1.3 on 429/5xx/timeout/bad JSON, as /api/command does; straight to
+//    Muse Spark if Gemini returned 429 in the last minute) gets the
 //    512px frame with a red ring at the point and returns {name, bbox, alternatives}.
 // 2. SAM 3.1 (docs: dev.meta.ai/docs/sam/segmenting): Responses API, model "sam-3.1", one input_text
 //    with box/point prompt tokens and one input_image. One call carries several objects: 1 = the
@@ -10,6 +11,7 @@
 // Measured on a 1280x720 webcam frame: SAM 0.8-2.3s, zero matches = 200 with empty text.
 import express, { Router } from "express";
 import { decodeMaskToRaster, parseImageStream, recordsOfKind } from "@meta-sam/parser";
+import { gemini429Recently, noteGeminiStatus } from "../geminiCooldown";
 
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
@@ -126,6 +128,7 @@ async function visionGemini(b: AimaskRequest, signal: AbortSignal): Promise<stri
       response_format: { type: "text", mime_type: "application/json", schema: VISION_SCHEMA },
     }),
   });
+  noteGeminiStatus(r.status);
   if (!r.ok) throw new ProviderError(r.status, `gemini ${r.status}: ${(await r.text()).slice(0, 300)}`);
   return ((await r.json()) as Interaction).steps
     ?.filter((s) => s.type === "model_output")
@@ -165,6 +168,10 @@ async function visionMeta(b: AimaskRequest, signal: AbortSignal): Promise<string
 }
 
 async function vision(b: AimaskRequest): Promise<{ vision: AiVision; provider: "gemini" | "meta"; fallback?: string }> {
+  // A 429 in the last minute (here or in /api/command) means the next Gemini call likely 429s too.
+  if (gemini429Recently()) {
+    return { vision: toVision(await visionMeta(b, AbortSignal.timeout(VISION_TIMEOUT_MS))), provider: "meta", fallback: "gemini 429 in the last minute" };
+  }
   try {
     return { vision: toVision(await visionGemini(b, AbortSignal.timeout(VISION_TIMEOUT_MS))), provider: "gemini" };
   } catch (e) {
@@ -281,6 +288,7 @@ aimaskRouter.post("/api/aimask", express.json({ limit: "8mb" }), async (req, res
     const got = await vision(body);
     v = got.vision;
     visionProvider = got.provider;
+    if (got.fallback) console.log(`[aimask] vision via meta: ${got.fallback}`);
   } catch (e) {
     visionError = message(e);
   }

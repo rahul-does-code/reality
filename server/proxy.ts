@@ -18,6 +18,7 @@ import {
   type SegmentNamedRequest,
   type SegmentNamedResponse,
 } from "../src/commands/schema";
+import { noteGeminiStatus } from "./geminiCooldown";
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -295,6 +296,7 @@ async function commandTextFromGemini(input: string, image: ImageInput | null, si
       body: payload,
     });
     const headersMs = Math.round(performance.now() - t0);
+    noteGeminiStatus(r.status); // same model as /api/aimask's vision call, so it shares the 429 cooldown
     if (!r.ok) {
       const detail = await r.text();
       throw new ProviderError(r.status, `gemini ${r.status}: ${detail.slice(0, 300)}`);

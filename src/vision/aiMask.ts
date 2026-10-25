@@ -19,7 +19,7 @@ export function setAiMask(m: AiMaskMode): void {
 export const getAiMask = (): AiMaskMode => mode;
 
 /** How long a command waits for the AI mask before using the MediaPipe one. */
-export const AI_MASK_WAIT_MS = 5_000;
+export const AI_MASK_WAIT_MS = 8_000;
 export const MIN_AI_COVERAGE = 0.003;
 export const MAX_AI_COVERAGE = 0.45;
 const MIN_BOX_IOU = 0.4;

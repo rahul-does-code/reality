@@ -6,6 +6,7 @@ import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
 import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
+import { AI_MASK_WAIT_MS, aiSegmentAt, getAiMask, onAiMask, setAiMask, type AiMaskResult } from "../vision/aiMask";
 import { bbox, coverage, feather, type Point } from "../vision/mask";
 import { combine, isClosed, selectStroke, type CombineMode } from "../vision/lasso";
 import { handHullInFrame, removeHand } from "../vision/handMask";
@@ -84,6 +85,9 @@ export default function Stage() {
   // intensity "adjust" right after re-blurs from the pre-blur frame instead of stacking.
   const lastBlurRef = useRef<{ base: ImageData; alpha: Float32Array; results: ImageData[] } | null>(null);
   const modelBusyRef = useRef(false);
+  // AI mask (vision + SAM) running in the background for the latest click/pinch. It only swaps in
+  // while it is still this exact object: same gesture (reqId), frame and point. swap is idempotent.
+  const aiPendingRef = useRef<{ id: number; frame: ImageData; p: Point; job: Promise<AiMaskResult>; swap: (r: AiMaskResult) => void } | null>(null);
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string | undefined>();
@@ -106,6 +110,8 @@ export default function Stage() {
   const [color, setColor] = useState(SWATCHES[0]);
   // Display-only: the stage's frame layers get scaleX(-1). All data stays in raw frame px.
   const [mirror, setMirror] = useState(true);
+  const [aiOn, setAiOn] = useState(getAiMask() === "always");
+  const [aiPending, setAiPending] = useState(false);
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
   const pttRef = useRef<PushToTalkLike | null>(null);
@@ -192,6 +198,8 @@ export default function Stage() {
     sourceRef.current = null;
     pointRef.current = null;
     segPromiseRef.current = null;
+    aiPendingRef.current = null;
+    setAiPending(false);
     setPoint(null);
     setSelTag(null);
     setAlpha(null);
@@ -285,8 +293,9 @@ export default function Stage() {
         let mask = combine(prev, seg.mask, mode);
         const notes = [`${seg.kind} ${seg.source} ${Math.round(seg.ms)}ms${seg.note ? ` (${seg.note})` : ""}`];
         if (mode !== "replace") notes.push(mode);
+        let hull: Uint8Array | null = null;
         if (g.source === "finger") {
-          const hull = await handHullInFrame(original);
+          hull = await handHullInFrame(original);
           if (id !== reqId.current) return;
           if (hull) {
             mask = removeHand(mask, hull, w, h);
@@ -308,7 +317,39 @@ export default function Stage() {
           setPoint(g.p);
         }
         const sel = { mask, subject: mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
-        applySelection(sel, original, g.kind === "click" ? (g.source === "finger" ? "pinch" : "click") : seg.kind);
+        const how = g.kind === "click" ? (g.source === "finger" ? "pinch" : "click") : seg.kind;
+        applySelection(sel, original, how);
+        // Clicks and pinches only (lasso/scribble already are what the user drew): the AI mask
+        // runs in the background; commands don't wait for it unless they arrive before it's done.
+        if (g.kind !== "click" || getAiMask() !== "always") return;
+        const token = {
+          id,
+          frame: original,
+          p: g.p,
+          job: aiSegmentAt(original, g.p),
+          swap: (r: AiMaskResult) => {
+            if (aiPendingRef.current !== token) return;
+            aiPendingRef.current = null;
+            setAiPending(false);
+            if (id !== reqId.current || historyRef.current.original !== original) return;
+            const detail = `${r.ms}ms${r.note ? ` (${r.note})` : ""}`;
+            // MediaPipe or the circle again: keep the instant mask, just say the AI one didn't work out.
+            if (r.source === "mediapipe" || r.source === "fallback") {
+              setSegInfo(`select · ${notes.join(" · ")} · ai mask fell back to ${r.source}, kept the instant mask: ${detail}`);
+              return;
+            }
+            let m = combine(prev, r.mask, mode);
+            if (hull) m = removeHand(m, hull, w, h);
+            if (coverage(m) === 0) return;
+            const name = `${r.name ?? "pointed"} (${r.source})`;
+            const aiLabel = mode === "replace" ? name : `${prevLabel} ${mode === "add" ? "+" : "−"} ${name}`;
+            const aiNotes = [...notes, `ai ${r.source} ${detail}`].join(" · ");
+            applySelection({ mask: m, subject: m, alpha: feather(m, w, h, 3), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
+          },
+        };
+        aiPendingRef.current = token;
+        setAiPending(true);
+        void token.job.then(token.swap);
       })();
       segPromiseRef.current = job;
       return job;
@@ -317,6 +358,14 @@ export default function Stage() {
     [clearStroke],
   );
   const selectGestureRef = useRef(selectGesture);
+  // AI masks report here too; a result for another frame or point (an older selection) is ignored.
+  useEffect(() => {
+    const off = onAiMask((frame, p, r) => {
+      const t = aiPendingRef.current;
+      if (t && t.frame === frame && t.p.x === p.x && t.p.y === p.y) t.swap(r);
+    });
+    return () => void off();
+  }, []);
   selectGestureRef.current = selectGesture;
 
   /** Point selection at p (hand-mode push-to-talk re-points at the fingertip). */
@@ -380,6 +429,9 @@ export default function Stage() {
       const mask = maskRef.current;
       const after = historyRef.current.current;
       if (!mask || !after) return;
+      // The edit used the instant mask; a late AI mask must not swap the selection under it.
+      aiPendingRef.current = null;
+      setAiPending(false);
       const sel = { mask, subject: subjectRef.current ?? mask, label: labelRef.current ?? "selection" };
       appliedRef.current = { ...e, before, after, sel };
     },
@@ -701,12 +753,32 @@ export default function Stage() {
         await segPromiseRef.current;
         timeline.mark("mask ready");
       }
+      // A command on the current selection that beats the AI mask waits for it (up to
+      // AI_MASK_WAIT_MS), then uses the instant MediaPipe mask. A voice "pointed" select waits
+      // inside resolveSelection instead (same cached job); a fresh named/face/background select
+      // doesn't need the pointed mask at all.
+      const s = command.select;
+      const onCurrent = !s || (s.source !== "pointed" && (s.refine === "grow" || s.refine === "shrink" || s.refine === "only"));
+      const pending = aiPendingRef.current;
+      let aiNote = "";
+      if (pending && onCurrent && !["undo", "retry", "adjust"].includes(command.op)) {
+        setVoiceStatus(`${h}"${transcript}" · waiting for AI mask...`);
+        const r = await Promise.race([pending.job, new Promise<null>((res) => setTimeout(() => res(null), AI_MASK_WAIT_MS))]);
+        if (r) pending.swap(r); // no-op if onAiMask already swapped it in
+        else if (aiPendingRef.current === pending) {
+          aiPendingRef.current = null;
+          setAiPending(false);
+          aiNote = " · ai mask timed out";
+          setSegInfo((t) => `${t} · ai mask timed out`);
+        }
+        timeline.mark(r ? "ai mask ready" : "ai mask timed out");
+      }
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
       setVoiceStatus(`${h}"${transcript}" → ${detail} · working...`);
       const result = await dispatchRef.current(command, false, timeline);
       logSelection(transcript);
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
-      setVoiceStatus(`${h}"${transcript}" → ${detail} · ${result} · ${via} ${ms}ms`);
+      setVoiceStatus(`${h}"${transcript}" → ${detail} · ${result}${aiNote} · ${via} ${ms}ms`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setVoiceStatus(`${h}"${transcript}" · error: ${msg}`);
@@ -1048,6 +1120,7 @@ export default function Stage() {
         <div className="badge">
           {frozen ? "FROZEN" : "LIVE"}
           {busy ? " · …" : ""}
+          {aiPending ? " · AI mask..." : ""}
         </div>
         {toast && <div className="error">{toast}</div>}
         <div className="hint">
@@ -1147,6 +1220,21 @@ export default function Stage() {
         <label className="check" title="Recolor the pointed object on the live video (finger or mouse hover)">
           <input type="checkbox" checked={liveOn} onChange={(e) => setLiveOn(e.target.checked)} />
           Live recolor
+        </label>
+        <label className="check" title="Clicks and pinches also get a vision + SAM 3.1 mask, swapped in when it arrives (~2-5s)">
+          <input
+            type="checkbox"
+            checked={aiOn}
+            onChange={(e) => {
+              setAiOn(e.target.checked);
+              setAiMask(e.target.checked ? "always" : "off");
+              if (!e.target.checked) {
+                aiPendingRef.current = null;
+                setAiPending(false);
+              }
+            }}
+          />
+          AI mask
         </label>
         <label className="check">
           <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />

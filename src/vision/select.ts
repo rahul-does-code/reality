@@ -229,7 +229,7 @@ export async function resolveSelection(
     label = `${name} (named)`;
   } else if (point) {
     // Only a command about the background/inverse may pick a mask covering most of the frame.
-    // AI mask (vision + SAM, see aiMask.ts) if it arrives within 5s, else the MediaPipe one.
+    // AI mask (vision + SAM, see aiMask.ts) if it arrives within AI_MASK_WAIT_MS, else the MediaPipe one.
     const ai = getAiMask() === "always" ? await aiSegmentWithin(frame, point, select.invert) : null;
     const res = ai ?? (await segmentPointed(frame, point, select.invert));
     base = res.mask;
