@@ -2,7 +2,9 @@
 // drawn onto a canvas and exposed as canvas.captureStream(30). Same shape as startCamera/stopCamera, so
 // everything downstream still only sees a playing <video>.
 // Frames come over a WebSocket as blobs (not the MJPEG <img>): a cross-origin <img> would taint the canvas,
-// and both captureStream and getImageData (segmentation) need an untainted one.
+// and both captureStream and getImageData (segmentation) need an untainted one. Each blob goes straight to
+// createImageBitmap (no <img>/object URL); only the newest is decoded, and requestAnimationFrame draws the
+// newest decoded bitmap, so nothing queues up behind a slow decode or a busy main thread.
 
 export const GLASSES_RELAY_PORT = 8788;
 const FIRST_FRAME_TIMEOUT_MS = 8_000;
@@ -15,21 +17,26 @@ type Active = {
   closed: boolean;
   reconnectTimer?: number;
   wake: () => void; // ends the first-frame wait when the source is stopped early
+  raf: number;
 };
+
+type FrameTimes = { tPhone: number | null; tRelay: number | null }; // Date.now() ms, from the relay
 
 let startToken = 0; // guards against overlapping starts (React StrictMode runs effects twice in dev)
 let active: Active | null = null;
 let frames = 0;
 let lastFrameAt = 0;
+let latencyMs: number | null = null; // phone capture -> drawn (needs phone and laptop clocks in sync)
+let relayLatencyMs: number | null = null; // relay arrival -> drawn (same machine, so always valid)
 
 export function defaultGlassesUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.hostname}:${GLASSES_RELAY_PORT}/glasses/ws`;
 }
 
-/** Frames drawn since the page loaded and the time of the last one (for fps/stall readouts). */
+/** Frames drawn since the page loaded, the time of the last one, and its latencies (for fps/stall readouts). */
 export function glassesStats() {
-  return { frames, lastFrameAt };
+  return { frames, lastFrameAt, latencyMs, relayLatencyMs };
 }
 
 export async function startGlassesSource(
@@ -46,45 +53,72 @@ export async function startGlassesSource(
   const stream = canvas.captureStream(30);
   let resolveFirst!: () => void;
   const firstFrame = new Promise<void>((r) => (resolveFirst = r));
-  const state: Active = { ws: null, canvas, stream, closed: false, wake: resolveFirst };
+  const state: Active = { ws: null, canvas, stream, closed: false, wake: resolveFirst, raf: 0 };
   active = state;
-  let pending: Blob | null = null; // newest frame waiting to be decoded; older ones are dropped
+  let times: FrameTimes = { tPhone: null, tRelay: null }; // from the text message before the next frame
+  let pending: { blob: Blob; times: FrameTimes } | null = null; // newest frame to decode; older are dropped
   let decoding = false;
+  let ready: { bmp: ImageBitmap; times: FrameTimes } | null = null; // newest decoded, not yet drawn
 
-  const drawNext = async () => {
+  const decodeNext = async () => {
     if (decoding || !pending || state.closed) return;
     decoding = true;
-    const blob = pending;
+    const next = pending;
     pending = null;
     try {
-      const bmp = await createImageBitmap(blob);
-      if (!state.closed) {
-        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-          canvas.width = bmp.width;
-          canvas.height = bmp.height;
-        }
-        ctx.drawImage(bmp, 0, 0);
-        frames++;
-        lastFrameAt = performance.now();
-        resolveFirst();
+      const bmp = await createImageBitmap(next.blob);
+      if (state.closed) bmp.close();
+      else {
+        ready?.bmp.close(); // never drawn: a newer one replaces it
+        ready = { bmp, times: next.times };
       }
-      bmp.close();
     } catch {
       // corrupt/partial JPEG: skip it
     } finally {
       decoding = false;
-      if (pending) void drawNext();
+      if (pending) void decodeNext();
     }
   };
+
+  const draw = () => {
+    if (state.closed) return;
+    state.raf = requestAnimationFrame(draw);
+    if (!ready) return;
+    const { bmp, times: t } = ready;
+    ready = null;
+    if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+    }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    frames++;
+    lastFrameAt = performance.now();
+    const now = Date.now();
+    latencyMs = t.tPhone != null ? now - t.tPhone : null;
+    relayLatencyMs = t.tRelay != null ? now - t.tRelay : null;
+    resolveFirst();
+  };
+  state.raf = requestAnimationFrame(draw);
 
   const connect = () => {
     if (state.closed) return;
     const ws = new WebSocket(url);
     ws.binaryType = "blob";
     ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        try {
+          const m = JSON.parse(ev.data);
+          times = { tPhone: m.tPhone ?? null, tRelay: m.tRelay ?? null };
+        } catch {
+          // not frame metadata
+        }
+        return;
+      }
       if (!(ev.data instanceof Blob)) return;
-      pending = ev.data;
-      void drawNext();
+      pending = { blob: ev.data, times };
+      times = { tPhone: null, tRelay: null };
+      void decodeNext();
     };
     ws.onclose = () => {
       if (!state.closed) state.reconnectTimer = window.setTimeout(connect, RECONNECT_MS);
@@ -130,6 +164,7 @@ export function stopGlassesSource(video?: HTMLVideoElement) {
   active = null;
   if (state) {
     state.closed = true;
+    cancelAnimationFrame(state.raf);
     clearTimeout(state.reconnectTimer);
     state.ws?.close();
     state.stream.getTracks().forEach((t) => t.stop());

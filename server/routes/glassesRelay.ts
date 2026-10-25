@@ -1,7 +1,11 @@
 // Glasses relay: the iPhone app (Meta Wearables DAT, Mock Device Kit) pushes JPEG frames over a WebSocket;
 // browsers read them back. One server on GLASSES_RELAY_PORT (default 8788):
-//   ws://<laptop-ip>:8788/            phone -> relay, one binary JPEG per message
-//   ws://<laptop-ip>:8788/glasses/ws  relay -> browser, latest JPEG per message (src/input/glassesSource.ts)
+//   ws://<laptop-ip>:8788/            phone -> relay, one binary JPEG per message, optionally preceded by a
+//                                     text {"t": capture ms, "fps": phone send fps}
+//   ws://<laptop-ip>:8788/glasses/ws  relay -> browser, text {"tPhone","tRelay"} then the JPEG
+//                                     (src/input/glassesSource.ts)
+// Every client gets only the latest frame: while a send to it is still being written, newer frames
+// replace each other and it gets the newest once the write finishes. Nothing is ever queued per client.
 //   GET /glasses/stream.mjpg          latest frames as multipart MJPEG (open in any browser tab)
 //   GET /glasses/latest.jpg           the latest frame
 //   GET /glasses/status               JSON: connected phones, fps in, frame count
@@ -12,12 +16,16 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 const PORT = Number(process.env.GLASSES_RELAY_PORT ?? 8788);
 const BOUNDARY = "glassesframe";
 
-let latest: Buffer | null = null;
+type Frame = { jpeg: Buffer; tPhone: number | null; tRelay: number };
+type Client = { busy: boolean; dirty: boolean };
+
+let latest: Frame | null = null;
 let frameCount = 0;
 let phones = 0;
+let phoneFps = 0; // send fps the phone reports
 const arrivals: number[] = []; // ms timestamps of the last second of frames, for fps
-const mjpegClients = new Set<http.ServerResponse>();
-const viewers = new Set<WebSocket>();
+const mjpegClients = new Map<http.ServerResponse, Client>();
+const viewers = new Map<WebSocket, Client>();
 
 function isJpeg(buf: Buffer) {
   return buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8;
@@ -35,24 +43,50 @@ function toBuffer(data: RawData): Buffer {
   return Buffer.from(data);
 }
 
-function writeMjpegPart(res: http.ServerResponse, jpeg: Buffer) {
+/** Returns false when the socket is backed up ("drain" fires once it has flushed). */
+function writeMjpegPart(res: http.ServerResponse, jpeg: Buffer): boolean {
   res.write(`--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.length}\r\n\r\n`);
   res.write(jpeg);
-  res.write("\r\n");
+  return res.write("\r\n");
 }
 
-function publish(jpeg: Buffer) {
-  latest = jpeg;
+function sendToViewer(ws: WebSocket, c: Client) {
+  if (!latest || ws.readyState !== WebSocket.OPEN) return;
+  if (c.busy) {
+    c.dirty = true;
+    return;
+  }
+  c.busy = true;
+  c.dirty = false;
+  ws.send(JSON.stringify({ tPhone: latest.tPhone, tRelay: latest.tRelay }));
+  ws.send(latest.jpeg, () => {
+    c.busy = false;
+    if (c.dirty) sendToViewer(ws, c);
+  });
+}
+
+function sendToMjpeg(res: http.ServerResponse, c: Client) {
+  if (!latest || res.destroyed) return;
+  if (c.busy) {
+    c.dirty = true;
+    return;
+  }
+  c.dirty = false;
+  if (!writeMjpegPart(res, latest.jpeg)) {
+    c.busy = true;
+    res.once("drain", () => {
+      c.busy = false;
+      if (c.dirty) sendToMjpeg(res, c);
+    });
+  }
+}
+
+function publish(jpeg: Buffer, tPhone: number | null) {
+  latest = { jpeg, tPhone, tRelay: Date.now() };
   frameCount++;
-  arrivals.push(Date.now());
-  for (const res of mjpegClients) {
-    // Skip slow clients instead of buffering frames for them (latest frame wins).
-    if (res.writableLength > jpeg.length * 2) continue;
-    writeMjpegPart(res, jpeg);
-  }
-  for (const ws of viewers) {
-    if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount < jpeg.length * 2) ws.send(jpeg);
-  }
+  arrivals.push(latest.tRelay);
+  for (const [res, c] of mjpegClients) sendToMjpeg(res, c);
+  for (const [ws, c] of viewers) sendToViewer(ws, c);
 }
 
 const server = http.createServer((req, res) => {
@@ -65,7 +99,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(404, { "Content-Type": "text/plain" }).end("no frame yet");
       return;
     }
-    res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": latest.length }).end(latest);
+    res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": latest.jpeg.length }).end(latest.jpeg);
     return;
   }
   if (path === "/glasses/stream.mjpg") {
@@ -74,14 +108,15 @@ const server = http.createServer((req, res) => {
       Connection: "keep-alive",
       Pragma: "no-cache",
     });
-    mjpegClients.add(res);
-    if (latest) writeMjpegPart(res, latest);
+    const c = { busy: false, dirty: false };
+    mjpegClients.set(res, c);
+    sendToMjpeg(res, c);
     req.on("close", () => mjpegClients.delete(res));
     return;
   }
   if (path === "/glasses/status") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), frameCount }));
+    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), phoneFps, frameCount }));
     return;
   }
   res.writeHead(404, { "Content-Type": "text/plain" }).end("not found");
@@ -92,18 +127,30 @@ const wss = new WebSocketServer({ server, maxPayload: 4 * 1024 * 1024 });
 wss.on("connection", (ws, req) => {
   const path = (req.url ?? "/").split("?")[0];
   if (path === "/glasses/ws") {
-    viewers.add(ws);
-    if (latest) ws.send(latest);
+    const c = { busy: false, dirty: false };
+    viewers.set(ws, c);
+    sendToViewer(ws, c);
     ws.on("close", () => viewers.delete(ws));
     return;
   }
   // Anything else is a phone sending frames.
   phones++;
   console.log(`[glasses] phone connected from ${req.socket.remoteAddress} (${phones} total)`);
+  let tPhone: number | null = null; // from the text message that precedes each frame
   ws.on("message", (data, isBinary) => {
-    if (!isBinary) return; // text messages are ignored (room for a hello/metadata later)
+    if (!isBinary) {
+      try {
+        const meta = JSON.parse(toBuffer(data).toString());
+        tPhone = typeof meta.t === "number" ? meta.t : null;
+        if (typeof meta.fps === "number") phoneFps = meta.fps;
+      } catch {
+        // not metadata; ignore
+      }
+      return;
+    }
     const buf = toBuffer(data);
-    if (isJpeg(buf)) publish(buf);
+    if (isJpeg(buf)) publish(buf, tPhone);
+    tPhone = null;
   });
   ws.on("close", () => {
     phones--;

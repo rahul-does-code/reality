@@ -18,7 +18,8 @@
   <body>
     <p>
       Relay: <code id="relay"></code> &middot; phones connected: <b id="phones">?</b> &middot;
-      relay fps in: <b id="fpsIn">?</b> &middot; frames: <b id="count">?</b>
+      phone send fps: <b id="phoneFps">?</b> &middot; relay fps in: <b id="fpsIn">?</b> &middot;
+      frames: <b id="count">?</b>
     </p>
     <div class="row">
       <figure>
@@ -29,6 +30,7 @@
         <video id="video" muted playsinline></video>
         <figcaption>
           <code>startGlassesSource(video)</code> (what the app sees): <b id="fps">-</b> fps,
+          latency phone&rarr;drawn <b id="lat">-</b> ms (relay&rarr;drawn <b id="relayLat">-</b> ms),
           <span id="size">-</span> <span id="err"></span>
         </figcaption>
       </figure>
@@ -55,14 +57,17 @@
 
       let lastFrames = 0;
       setInterval(async () => {
-        const { frames } = glassesStats();
+        const { frames, latencyMs, relayLatencyMs } = glassesStats();
         $("fps").textContent = String(frames - lastFrames);
+        $("lat").textContent = latencyMs ?? "-";
+        $("relayLat").textContent = relayLatencyMs ?? "-";
         lastFrames = frames;
         $("size").textContent = video.videoWidth ? `${video.videoWidth}x${video.videoHeight}` : "-";
         try {
           const s = await (await fetch(`${base}/glasses/status`)).json();
           $("phones").textContent = s.phones;
           $("fpsIn").textContent = s.fpsIn;
+          $("phoneFps").textContent = s.phoneFps ?? "-";
           $("count").textContent = s.frameCount;
         } catch {
           $("phones").textContent = "relay down";
