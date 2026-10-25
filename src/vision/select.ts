@@ -179,8 +179,8 @@ export const notFound = (name: string) => `Couldn't find '${name}' - try again o
 /**
  * Resolve a `select` into a feathered alpha (plus the binary mask, for later refines).
  * `frame` must be the ORIGINAL frozen frame. `current` is the selection to build on: refines,
- * regions without a point, and "background" apply to it. refine "clear"/"only" are handled by
- * Stage; here "only" behaves like no refine.
+ * regions without a point, and "background" apply to it. refine "clear"/"only"/"add"/"subtract" are
+ * handled by Stage; here they behave like no refine.
  */
 export async function resolveSelection(
   select: Select,

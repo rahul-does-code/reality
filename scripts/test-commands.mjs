@@ -52,6 +52,8 @@ const UTTERANCES = [
   ["make that red", (c) => c.op === "recolor" && !c.select?.refine],
   ["only the top half", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "top" && c.select.region.fraction === 0.5],
   ["just the left side", (c) => c.op === "select" && c.select?.refine === "only" && c.select.region?.side === "left"],
+  ["add this", (c) => c.op === "select" && c.select?.refine === "add"],
+  ["not this part", (c) => c.op === "select" && c.select?.refine === "subtract"],
   ["only the handle", (c) => c.op === "select" && c.select?.refine === "only" && c.select.source === "named" && /handle/.test(c.select.name ?? "")],
 ];
 

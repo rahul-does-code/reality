@@ -1,6 +1,8 @@
 // Keep the pointing hand out of a selection: when the pointer source is "finger", the segmenter
 // often grabs the finger along with the object. Mask the hand's (dilated) convex hull out, then
 // tidy the cut: fill small holes away from the hand and drop small slivers left beside it.
+import { HandLandmarker } from "@mediapipe/tasks-vision";
+import { loadLocalModel, visionFileset } from "./assets";
 import { fillPolygon } from "./lasso";
 import { dilate, type Point } from "./mask";
 
@@ -84,4 +86,44 @@ export function removeHand(mask: Uint8Array, hullMask: Uint8Array, w: number, h:
     for (let k = 0; k < c.length; k++) out[c[k]] = 0;
   }
   return out;
+}
+
+// IMAGE-mode landmarker for frozen frames, separate from the live tracker (the selection track
+// never touches the pointer track). Same setup as the strokes debug page.
+let handPromise: Promise<HandLandmarker> | null = null;
+function initHandImage(): Promise<HandLandmarker> {
+  handPromise ??= (async () => {
+    const fileset = await visionFileset();
+    const buf = await loadLocalModel("/models/hand_landmarker.task");
+    return HandLandmarker.createFromOptions(fileset, {
+      runningMode: "IMAGE",
+      numHands: 1,
+      baseOptions: buf
+        ? { modelAssetBuffer: buf }
+        : { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
+    });
+  })();
+  handPromise.catch(() => (handPromise = null));
+  return handPromise;
+}
+
+const hullCache = new WeakMap<ImageData, Promise<Uint8Array | null>>();
+
+/** Dilated hand hull in `frame` (memoized per frame), or null if no hand is found or the model fails. */
+export function handHullInFrame(frame: ImageData): Promise<Uint8Array | null> {
+  let job = hullCache.get(frame);
+  if (!job) {
+    const { width: w, height: h } = frame;
+    job = initHandImage()
+      .then((lm) => {
+        const lms = lm.detect(frame).landmarks[0]?.map((p) => ({ x: p.x * w, y: p.y * h }));
+        return lms ? handHullMask(lms, w, h, 12) : null;
+      })
+      .catch((e) => {
+        console.warn("[hand] hull detection failed", e);
+        return null;
+      });
+    hullCache.set(frame, job);
+  }
+  return job;
 }

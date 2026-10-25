@@ -5,7 +5,10 @@ import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
 import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
-import { bbox, feather, type Point } from "../vision/mask";
+import { bbox, coverage, feather, type Point } from "../vision/mask";
+import { combine, isClosed, selectStroke, type CombineMode } from "../vision/lasso";
+import { handHullInFrame, removeHand } from "../vision/handMask";
+import { StrokeRecognizer, type Gesture } from "../input/strokes";
 import { recolor } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
 import { composite, dimInside } from "../edit/composite";
@@ -17,7 +20,7 @@ import { Timeline } from "../commands/timeline";
 const CROSSFADE_MS = 400;
 import { PushToTalk, speechSupported } from "../input/speech";
 import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
-import { emitMouse, pointer, usePointerSamples, type PointerSource } from "../input/pointer";
+import { emitMouse, pointer, usePointerSamples } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
 import type { Command, Select } from "../commands/schema";
 
@@ -27,6 +30,12 @@ export default function Stage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  // In-progress stroke (lasso/scribble) drawn in frame px, inside the mirrored layer.
+  const strokeRef = useRef<HTMLCanvasElement>(null);
+  // How the next gesture combines with the current selection: the mouse sets it per press
+  // (Shift add, Alt subtract); a voice "add this" / "not this part" overrides it once.
+  const modeRef = useRef<CombineMode>("replace");
+  const voiceModeRef = useRef<CombineMode | null>(null);
   // Dimmed/desaturated masked region while a model edit runs; fades out over the result.
   const pendingRef = useRef<HTMLCanvasElement>(null);
   const historyRef = useRef(new FrameHistory());
@@ -107,8 +116,6 @@ export default function Stage() {
   const [showHud, setShowHud] = useState(false);
   const hudRef = useRef<HTMLPreElement>(null);
   const rawDotRef = useRef<HTMLDivElement>(null);
-  // Last `pressed` per source, to act on the press edge only.
-  const pressedRef = useRef<Record<PointerSource, boolean>>({ finger: false, mouse: false });
 
   // Preload the segmentation model so the first click is fast.
   useEffect(() => {
@@ -163,6 +170,11 @@ export default function Stage() {
     setSegInfo((s) => (s.startsWith("model failed") ? s : ""));
   }, []);
 
+  const clearStroke = useCallback(() => {
+    const c = strokeRef.current;
+    c?.getContext("2d")!.clearRect(0, 0, c.width, c.height);
+  }, []);
+
   const freeze = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -180,12 +192,15 @@ export default function Stage() {
   }, [clearSelection]);
 
   const resume = useCallback(() => {
+    recognizer.current.reset();
+    voiceModeRef.current = null;
+    clearStroke();
     historyRef.current.clear();
     setDepth(0);
     clearSelection();
     appliedRef.current = null;
     setFrozen(false);
-  }, [clearSelection]);
+  }, [clearSelection, clearStroke]);
 
   const undo = useCallback(() => {
     const canvas = canvasRef.current;
@@ -195,47 +210,121 @@ export default function Stage() {
     setDepth(historyRef.current.depth);
   }, []);
 
-  // Segment on the ORIGINAL frozen frame so earlier edits never confuse the model.
-  // The returned promise is also kept in segPromiseRef so commands can wait for the mask.
-  const runSegment = useCallback((p: Point): Promise<void> => {
-    const original = historyRef.current.original;
-    if (!original) return Promise.resolve();
-    const id = ++reqId.current;
-    setBusy(true);
-    pointRef.current = p;
-    alphaRef.current = null;
-    maskRef.current = null;
-    setAlpha(null);
-    setSelTag(null);
-    const job = segmentPointed(original, p).then((res) => {
-      if (id !== reqId.current) return; // a newer click or a resume superseded this one
-      const a = feather(res.mask, original.width, original.height, 3);
-      maskRef.current = res.mask;
-      subjectRef.current = res.mask;
-      labelRef.current = "pointed";
-      sourceRef.current = "click";
-      alphaRef.current = a;
-      setAlpha(a);
-      setSegInfo(`${res.source} · ${Math.round(res.ms)}ms${res.note ? ` · ${res.note}` : ""}`);
-      setBusy(false);
-    });
-    segPromiseRef.current = job;
-    return job;
+  const drawStroke = useCallback((points: Point[]) => {
+    const c = strokeRef.current;
+    if (!c || !points.length) return;
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, c.width, c.height);
+    const closed = isClosed(points);
+    ctx.strokeStyle = closed ? "#ffd400" : "#ff9f1c";
+    ctx.lineWidth = Math.max(2, c.width / 400);
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    points.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    if (closed) ctx.closePath();
+    ctx.stroke();
   }, []);
+
+  /**
+   * A finished click or stroke -> selection. Segments on the ORIGINAL frozen frame so earlier edits
+   * never confuse the model: click = segment at the point, closed stroke = lasso, open = scribble.
+   * Combined with the current selection per `mode`; finger gestures get the hand cut out. The
+   * promise is kept in segPromiseRef so commands can wait for the mask.
+   */
+  const selectGesture = useCallback(
+    (g: Extract<Gesture, { kind: "click" | "stroke" }>, mode: CombineMode): Promise<void> => {
+      const original = historyRef.current.original;
+      if (!original) return Promise.resolve();
+      const { width: w, height: h } = original;
+      const id = ++reqId.current;
+      const prev = mode === "replace" ? null : maskRef.current;
+      const prevLabel = labelRef.current ?? "selection";
+      setBusy(true);
+      if (g.kind === "click" && mode === "replace") {
+        pointRef.current = g.p;
+        setPoint(g.p);
+        alphaRef.current = null;
+        maskRef.current = null;
+        setAlpha(null);
+        setSelTag(null);
+      }
+      const job = (async () => {
+        const seg =
+          g.kind === "click" ? { kind: "pointed" as const, ...(await segmentPointed(original, g.p)) } : await selectStroke(original, g.points);
+        if (id !== reqId.current) return; // a newer gesture or a resume superseded this one
+        let mask = combine(prev, seg.mask, mode);
+        const notes = [`${seg.kind} ${seg.source} ${Math.round(seg.ms)}ms${seg.note ? ` (${seg.note})` : ""}`];
+        if (mode !== "replace") notes.push(mode);
+        if (g.source === "finger") {
+          const hull = await handHullInFrame(original);
+          if (id !== reqId.current) return;
+          if (hull) {
+            mask = removeHand(mask, hull, w, h);
+            notes.push("hand removed");
+          }
+        }
+        clearStroke();
+        setBusy(false);
+        if (coverage(mask) === 0) {
+          setSegInfo(`${notes.join(" · ")} · selection is empty`);
+          if (mode === "subtract") clearSelection();
+          return;
+        }
+        const label = mode === "replace" ? seg.kind : `${prevLabel} ${mode === "add" ? "+" : "−"} ${seg.kind}`;
+        const usedPoint = g.kind === "click" && mode === "replace";
+        if (usedPoint) {
+          pointRef.current = g.p;
+          setPoint(g.p);
+        }
+        const sel = { mask, subject: mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
+        applySelection(sel, original, g.kind === "click" ? (g.source === "finger" ? "pinch" : "click") : seg.kind);
+      })();
+      segPromiseRef.current = job;
+      return job;
+    },
+    // applySelection (declared below) and clearSelection have no deps, so they never change.
+    [clearStroke],
+  );
+  const selectGestureRef = useRef(selectGesture);
+  selectGestureRef.current = selectGesture;
+
+  /** Point selection at p (hand-mode push-to-talk re-points at the fingertip). */
+  const runSegment = useCallback(
+    (p: Point, source: "finger" | "mouse" = "finger") =>
+      selectGestureRef.current({ kind: "click", p, source, ms: 0 }, "replace"),
+    [],
+  );
+
+  const recognizer = useRef(
+    new StrokeRecognizer((g) => {
+      if (g.kind === "progress") drawStrokeRef.current(g.points);
+      else if (g.kind === "cancel") clearStrokeRef.current();
+      else {
+        const mode = voiceModeRef.current ?? (g.source === "mouse" ? modeRef.current : "replace");
+        voiceModeRef.current = null;
+        void selectGestureRef.current(g, mode);
+      }
+    }),
+  );
+  const drawStrokeRef = useRef(drawStroke);
+  drawStrokeRef.current = drawStroke;
+  const clearStrokeRef = useRef(clearStroke);
+  clearStrokeRef.current = clearStroke;
 
   // The mouse on the frozen canvas emits the same PointerSamples as the hand.
   const onCanvasMouse = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.type === "mousedown") modeRef.current = e.shiftKey ? "add" : e.altKey ? "subtract" : "replace";
     if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, true, mirror);
   };
   const onCanvasLeave = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, false, mirror);
   };
 
-  // Selection reads samples only: a press (click or pinch) on the frozen frame points there.
+  // Selection reads samples only: on the frozen frame they feed the gesture recognizer, which
+  // selects on release (click/pinch = point, loop = lasso, line = scribble).
   // The finger also drives the on-screen cursor, moved on the DOM to avoid re-renders.
   usePointerSamples((s) => {
-    const wasPressed = pressedRef.current[s.source];
-    pressedRef.current[s.source] = s.pressed;
     if (s.source === "finger") {
       setHandSeen(s.handPresent);
       const cursor = cursorRef.current;
@@ -246,11 +335,7 @@ export default function Stage() {
         cursor.style.top = `${(s.y / size.h) * 100}%`;
       }
     }
-    if (s.pressed && !wasPressed && historyRef.current.current) {
-      const p = { x: s.x, y: s.y };
-      setPoint(p);
-      void runSegment(p);
-    }
+    if (historyRef.current.current) recognizer.current.feed(s);
   });
 
   const pushFrame = useCallback((out: ImageData) => {
@@ -407,6 +492,10 @@ export default function Stage() {
       if (select?.refine === "clear") {
         clearSelection();
         return "selection cleared";
+      }
+      if (select?.refine === "add" || select?.refine === "subtract") {
+        voiceModeRef.current = select.refine;
+        return `next click or stroke will ${select.refine === "add" ? "add to" : "cut from"} the selection`;
       }
       const original = historyRef.current.original;
       const current = (): CurrentSelection =>
@@ -775,6 +864,7 @@ export default function Stage() {
             style={{ "--crossfade": `${CROSSFADE_MS}ms` } as React.CSSProperties}
           />
           <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
+          <canvas ref={strokeRef} width={size.w} height={size.h} className="layer" style={{ pointerEvents: "none" }} />
           {frozen && point && (
             <div
               className="marker"

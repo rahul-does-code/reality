@@ -113,6 +113,7 @@ Selection (the "select" field says WHAT to edit; op says what to DO):
   - region { side: top|bottom|left|right|center, fraction 0..1 } keeps only part of the object: "top half" -> top 0.5, "left third" -> left 0.33, "the middle" -> center 0.5.
   - refine "grow" or "shrink" changes the size of the current selection: "a bit bigger", "grow it", "include more" -> grow; "smaller", "tighter", "less of it" -> shrink. Copy source, name and face_part from the previous command's select if it had one, else source "pointed"; region null.
   - refine "clear" deselects: "deselect", "clear selection", "never mind", "select nothing" -> op select, select {source pointed, refine clear}, everything else null.
+  - refine "add" / "subtract" combine the user's NEXT point or drawn stroke with the current selection: "add this", "this too", "and this part" -> add; "not this part", "minus this", "except this bit" (while building a selection by pointing) -> subtract. Use op select, select {source pointed, refine add|subtract}, everything else null. (Named "everything except the bottle" is still invert, not subtract.)
   - refine "only" narrows to part of the current object: "only the top half", "just the left side", "only the handle", "only the top half of this can". Use op select (unless a new edit is also spoken) with either a region (source pointed) or, for a named part, source named with a name that says whose part it is ("mug handle"). The app re-applies the previous edit to just that part.
 - If the utterance only chooses or resizes what is selected and asks for no edit ("select the tree", "only the top half of this can", "a bit bigger", "change my nose"), op is "select" and color, adjust, prompt, intensity are null.
 - If it asks for an edit too ("make the top half of this can red", "blur my face"), use that op and fill select.
@@ -130,6 +131,8 @@ Examples:
 - "blur everything except the bottle" -> op blur, target named, target_name "bottle", intensity 0.6, select {source named, name "bottle", invert true}
 - "only the handle" (previous op recolor on a mug) -> op select, target named, target_name "mug handle", select {source named, name "mug handle", refine only}
 - "deselect" / "never mind" -> op select, select {source pointed, refine clear}
+- "add this" -> op select, select {source pointed, refine add}
+- "not this part" -> op select, select {source pointed, refine subtract}
 - "select the tree" -> op select, target named, target_name "tree", select {source named, name "tree"}
 - "a bit bigger" (previous select {source named, name "tree"}) -> op select, select {source named, name "tree", refine grow}`;
 

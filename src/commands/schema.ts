@@ -7,7 +7,8 @@ export const SELECT_SOURCES = ["pointed", "named", "face_part", "background"] as
 export const FACE_PARTS = ["nose", "lips", "left_eye", "right_eye", "eyes", "eyebrows", "face", "hair"] as const;
 export const REGION_SIDES = ["top", "bottom", "left", "right", "center"] as const;
 // clear = deselect; only = narrow what was just edited ("only the top half") and redo that edit.
-export const REFINES = ["grow", "shrink", "clear", "only"] as const;
+// add / subtract = the NEXT click or stroke is unioned with / cut from the current selection.
+export const REFINES = ["grow", "shrink", "clear", "only", "add", "subtract"] as const;
 
 export type Op = (typeof OPS)[number];
 export type Target = (typeof TARGETS)[number];
