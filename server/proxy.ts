@@ -13,6 +13,9 @@ import {
   type EditRequest,
   type EditResponse,
   type MetaSpeedOptions,
+  type NamedInstance,
+  type SegmentNamedRequest,
+  type SegmentNamedResponse,
 } from "../src/commands/schema";
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
@@ -33,6 +36,15 @@ const META_CHAT_URL = "https://api.meta.ai/v1/chat/completions";
 const META_TEXT_MODEL = process.env.META_TEXT_MODEL ?? "muse-spark-1.3";
 // Reasoning can't be turned off on Muse Spark ("none" is a 400); "minimal" is the shortest pass.
 const META_REASONING_EFFORT = process.env.META_REASONING_EFFORT ?? "minimal";
+
+// Named-object segmentation (/api/segment-named). Measured on a test frame: flash-lite returns boxes in
+// ~1.4s but its masks come back empty (and asking for them via the schema hangs); gemini-3.8-flash
+// returns masks but took ~80s (and rejects "minimal" thinking). So by default only boxes are requested
+// and the browser segments inside the box; GEMINI_SEGMENT_MASKS=true asks for masks too.
+const SEGMENT_MODEL = process.env.GEMINI_SEGMENT_MODEL ?? MODEL;
+const SEGMENT_MASKS = process.env.GEMINI_SEGMENT_MASKS === "true";
+const SEGMENT_THINKING = process.env.GEMINI_SEGMENT_THINKING ?? "minimal"; // docs recommend minimal
+const SEGMENT_TIMEOUT_MS = SEGMENT_MASKS ? 90_000 : 15_000;
 
 // Image edits (remove/replace): IMAGE_PROVIDER=meta (default, Muse Image) or gemini.
 const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER === "gemini" ? "gemini" : "meta";
@@ -94,6 +106,10 @@ Selection (the "select" field says WHAT to edit; op says what to DO):
 - If it asks for an edit too ("make the top half of this can red", "blur my face"), use that op and fill select.
 - "bigger"/"smaller" are refine (op select), not adjust. adjust is only for color/brightness/strength of the previous edit.
 
+Image (only when one is attached): it is the frozen frame the user is looking at, and the text may say where they point.
+- Use it to resolve descriptions: "the one on the left", "the taller one", "the red cup". If the description picks out an object, use select source "named" with a name that identifies that one object in the image ("leftmost mug", "taller bottle"), not just its category.
+- Plain "this"/"that" with no description still means the pointed object (select null or source "pointed").
+
 Examples:
 - "change my nose" -> op select, select {source face_part, face_part nose}
 - "only the top half of this can" -> op select, target pointed, select {source pointed, region {side top, fraction 0.5}}
@@ -107,14 +123,19 @@ Output format: reply with exactly one JSON object with the keys op, target, targ
 
 const app = express();
 app.use(cors());
-const smallJson = express.json({ limit: "32kb" });
 const imageJson = express.json({ limit: "8mb" });
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, model: MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
+  res.json({ ok: true, model: MODEL, segmentModel: SEGMENT_MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
 });
 
-app.post("/api/command", smallJson, async (req, res) => {
+// Running average Gemini latency with and without the frame, so the log shows what the image adds.
+const geminiMs = { text: { n: 0, sum: 0 }, image: { n: 0, sum: 0 } };
+const avgMs = (k: keyof typeof geminiMs) => (geminiMs[k].n ? Math.round(geminiMs[k].sum / geminiMs[k].n) : null);
+
+const unit = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
+
+app.post("/api/command", imageJson, async (req, res) => {
   const t0 = performance.now();
   const body = req.body as Partial<CommandRequest>;
   const transcript = typeof body?.transcript === "string" ? body.transcript.trim() : "";
@@ -124,6 +145,19 @@ app.post("/api/command", smallJson, async (req, res) => {
   }
   const previous = body.previous ?? null;
   const input = `Previous command: ${previous ? JSON.stringify(previous) : "none"}\nUtterance: "${transcript}"`;
+  // Optional frozen frame (+ point) for Gemini; the Meta fallback stays text-only.
+  const frame = typeof body.frame === "string" && body.frame ? body.frame : null;
+  const point = frame && body.point && unit(body.point.x) && unit(body.point.y) ? body.point : null;
+  const imageInput = frame
+    ? {
+        frame,
+        text:
+          `${input}\nThe attached image is the frozen camera frame. ` +
+          (point
+            ? `The user is pointing at x=${point.x.toFixed(2)},y=${point.y.toFixed(2)} (normalized, origin top-left).`
+            : "The user is not pointing at anything."),
+      }
+    : null;
   // Per-request override (used by scripts/test-commands.mjs to compare providers).
   const mode = asMode(body.provider) ?? COMMAND_PROVIDER;
 
@@ -132,17 +166,29 @@ app.post("/api/command", smallJson, async (req, res) => {
   try {
     let command: Command;
     try {
-      command = await parseWith(provider, input);
+      command = await parseWith(provider, input, imageInput);
     } catch (e) {
       if (mode !== "auto" || !shouldFallback(e)) throw e;
       fallback = errorMessage(e);
       console.warn(`gemini failed (${fallback}), retrying with meta`);
       provider = "meta";
-      command = await parseWith(provider, input);
+      command = await parseWith(provider, input, null); // Meta is text-only
     }
     const ms = Math.round(performance.now() - t0);
-    console.log(`[${ms}ms ${provider}${fallback ? " fallback" : ""}] "${transcript}" -> ${JSON.stringify(command)}`);
-    res.json({ command, ms, provider, ...(fallback ? { fallback } : {}) } satisfies CommandResponse);
+    const image = provider === "gemini" && !!imageInput;
+    let imageNote = "";
+    if (provider === "gemini") {
+      const k = image ? "image" : "text";
+      geminiMs[k].n++;
+      geminiMs[k].sum += ms;
+      const textAvg = avgMs("text");
+      if (image) {
+        const kb = Math.round(frame!.length / 1024);
+        imageNote = ` +image ${kb}kB b64${textAvg !== null ? `, ~${ms - textAvg}ms over text-only avg ${textAvg}ms` : ", no text-only baseline yet"}`;
+      }
+    }
+    console.log(`[${ms}ms ${provider}${fallback ? " fallback" : ""}${imageNote}] "${transcript}" -> ${JSON.stringify(command)}`);
+    res.json({ command, ms, provider, ...(fallback ? { fallback } : {}), ...(image ? { image } : {}) } satisfies CommandResponse);
   } catch (e) {
     const msg = errorMessage(e);
     console.error(`${provider} command error:`, msg);
@@ -168,9 +214,12 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-async function parseWith(provider: CommandProvider, input: string): Promise<Command> {
+type ImageInput = { frame: string; text: string };
+
+async function parseWith(provider: CommandProvider, input: string, image: ImageInput | null): Promise<Command> {
   const signal = AbortSignal.timeout(COMMAND_TIMEOUT_MS);
-  const text = provider === "meta" ? await commandTextFromMeta(input, signal) : await commandTextFromGemini(input, signal);
+  const text =
+    provider === "meta" ? await commandTextFromMeta(input, signal) : await commandTextFromGemini(input, image, signal);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -182,7 +231,7 @@ async function parseWith(provider: CommandProvider, input: string): Promise<Comm
   return command;
 }
 
-async function commandTextFromGemini(input: string, signal: AbortSignal): Promise<string> {
+async function commandTextFromGemini(input: string, image: ImageInput | null, signal: AbortSignal): Promise<string> {
   if (!API_KEY) throw new ProviderError(500, "GEMINI_API_KEY missing from .env");
   const r = await fetch(GEMINI_URL, {
     method: "POST",
@@ -191,7 +240,13 @@ async function commandTextFromGemini(input: string, signal: AbortSignal): Promis
     body: JSON.stringify({
       model: MODEL,
       system_instruction: SYSTEM_PROMPT,
-      input,
+      // Docs (image understanding): text part, then the image part as base64 with its mime_type.
+      input: image
+        ? [
+            { type: "text", text: image.text },
+            { type: "image", mime_type: "image/jpeg", data: image.frame },
+          ]
+        : input,
       store: false,
       generation_config: { thinking_level: THINKING },
       response_format: { type: "text", mime_type: "application/json", schema: COMMAND_JSON_SCHEMA },
@@ -398,6 +453,136 @@ app.post("/api/edit", imageJson, async (req, res) => {
         ? e.message
         : String(e);
     res.status(status).json({ error: msg } satisfies EditResponse);
+  }
+});
+
+// Response schema from the docs' segmentation example: box_2d [ymin, xmin, ymax, xmax] normalized to
+// 0-1000, plus (masks on) the mask as an integer array of arrays.
+const SEGMENT_SCHEMA = {
+  type: "object",
+  properties: {
+    boxes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          box_2d: { type: "array", items: { type: "integer" } },
+          ...(SEGMENT_MASKS ? { mask: { type: "array", items: { type: "array", items: { type: "integer" } } } } : {}),
+          label: { type: "string" },
+        },
+        required: SEGMENT_MASKS ? ["box_2d", "mask", "label"] : ["box_2d", "label"],
+      },
+    },
+  },
+  required: ["boxes"],
+} as const;
+
+const SEGMENT_PROMPT = (name: string) =>
+  (SEGMENT_MASKS
+    ? `Find every "${name}" in the image. Give the segmentation masks for them. ` +
+      `Output a JSON list of segmentation masks where each entry contains the 2D bounding box in the key "box_2d", ` +
+      `the segmentation mask in key "mask", and the text label in the key "label". Use descriptive labels. `
+    : `Detect every "${name}" in the image. Output a JSON list where each entry contains the 2D bounding box ` +
+      `in the key "box_2d" and the text label in the key "label". Use descriptive labels. `) +
+  `If there is no "${name}", return an empty list.`;
+
+type RawBox = { box_2d?: unknown; mask?: unknown; label?: unknown };
+type Pt = [number, number];
+
+/**
+ * 0-1000 model output -> 0..1 frame coords. The docs call the mask a polygon of [x, y] points "inside
+ * the bounding box" without saying relative to what: if most points land in the box as image coords,
+ * use them as-is, otherwise read them as box-relative. gemini-3.8-flash instead returned 4-int
+ * [ymin, xmin, ymax, xmax] rectangles (image coords); those become one rectangle polygon each.
+ */
+function toInstance(b: RawBox): (NamedInstance & { maskKind: string }) | null {
+  const box = b.box_2d;
+  if (!Array.isArray(box) || box.length !== 4 || !box.every((v) => typeof v === "number")) return null;
+  const [ymin, xmin, ymax, xmax] = (box as number[]).map((v) => Math.min(1000, Math.max(0, v)) / 1000);
+  if (xmax <= xmin || ymax <= ymin) return null;
+  const rows = Array.isArray(b.mask)
+    ? (b.mask as unknown[]).filter((p): p is number[] => Array.isArray(p) && p.every((v) => typeof v === "number"))
+    : [];
+  const pts = rows.filter((r) => r.length === 2) as Pt[];
+  const rects = rows.filter((r) => r.length === 4);
+  let polygons: Pt[][] | null = null;
+  let maskKind = "none";
+  if (pts.length >= 3) {
+    const tol = 0.02;
+    const inBox = pts.filter(
+      ([x, y]) => x / 1000 >= xmin - tol && x / 1000 <= xmax + tol && y / 1000 >= ymin - tol && y / 1000 <= ymax + tol,
+    ).length;
+    const imageFrame = inBox / pts.length >= 0.8;
+    maskKind = `${pts.length}pt/${imageFrame ? "image" : "box"}`;
+    polygons = [
+      pts.map(([x, y]): Pt =>
+        imageFrame ? [x / 1000, y / 1000] : [xmin + (x / 1000) * (xmax - xmin), ymin + (y / 1000) * (ymax - ymin)],
+      ),
+    ];
+  } else if (rects.length) {
+    maskKind = `${rects.length}rect`;
+    polygons = rects.map(([y0, x0, y1, x1]): Pt[] => {
+      const [a, b2, c, d] = [x0 / 1000, y0 / 1000, x1 / 1000, y1 / 1000];
+      return [[a, b2], [c, b2], [c, d], [a, d]];
+    });
+  }
+  const label = typeof b.label === "string" ? b.label : "";
+  return { label, box: { x0: xmin, y0: ymin, x1: xmax, y1: ymax }, polygons, maskKind };
+}
+
+app.post("/api/segment-named", imageJson, async (req, res) => {
+  const t0 = performance.now();
+  const b = req.body as Partial<SegmentNamedRequest>;
+  const name = typeof b?.name === "string" ? b.name.trim() : "";
+  if (typeof b?.frame !== "string" || !b.frame || !name) {
+    res.status(400).json({ error: "frame and name required" } satisfies SegmentNamedResponse);
+    return;
+  }
+  if (!API_KEY) {
+    res.status(500).json({ error: "GEMINI_API_KEY missing from .env" } satisfies SegmentNamedResponse);
+    return;
+  }
+  try {
+    const r = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": API_KEY },
+      signal: AbortSignal.timeout(SEGMENT_TIMEOUT_MS),
+      body: JSON.stringify({
+        model: SEGMENT_MODEL,
+        store: false,
+        input: [
+          { type: "text", text: SEGMENT_PROMPT(name) },
+          { type: "image", mime_type: "image/jpeg", data: b.frame },
+        ],
+        generation_config: { thinking_level: SEGMENT_THINKING },
+        response_format: { type: "text", mime_type: "application/json", schema: SEGMENT_SCHEMA },
+      }),
+    });
+    if (!r.ok) {
+      const detail = await r.text();
+      throw new ProviderError(r.status, `gemini ${r.status}: ${detail.slice(0, 300)}`);
+    }
+    const text = extractText(await r.json());
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new ProviderError(502, `gemini returned non-JSON: ${text.slice(0, 200)}`);
+    }
+    // Schema says { boxes: [...] }; accept a bare list too, as in the docs' prompt.
+    const raw = Array.isArray(parsed) ? parsed : ((parsed as { boxes?: unknown })?.boxes ?? []);
+    const found = (Array.isArray(raw) ? (raw as RawBox[]) : []).map(toInstance).filter((i) => i !== null);
+    const ms = Math.round(performance.now() - t0);
+    const kinds = found.map((i) => `${i.label || "?"}:${i.maskKind}`).join(", ");
+    console.log(`[${ms}ms segment ${SEGMENT_MODEL}${SEGMENT_MASKS ? " masks" : ""}] "${name}" -> ${found.length} instance(s) ${kinds}`);
+    const instances: NamedInstance[] = found.map(({ label, box, polygons }) => ({ label, box, polygons }));
+    res.json({ instances, ms } satisfies SegmentNamedResponse);
+  } catch (e) {
+    const timedOut = isTimeout(e);
+    const msg = timedOut ? `segmentation timed out after ${SEGMENT_TIMEOUT_MS / 1000}s` : e instanceof Error ? e.message : String(e);
+    console.error("segment-named error:", msg);
+    const status = e instanceof ProviderError ? (e.status === 429 ? 429 : 502) : timedOut ? 504 : 500;
+    res.status(status).json({ error: msg } satisfies SegmentNamedResponse);
   }
 });
 

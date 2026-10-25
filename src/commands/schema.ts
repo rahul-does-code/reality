@@ -60,12 +60,38 @@ export interface CommandRequest {
   previous: Command | null;
   /** Optional override of the server's COMMAND_PROVIDER. */
   provider?: CommandProvider | "auto";
+  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 768px. Gemini sees it; Meta stays text-only. */
+  frame?: string;
+  /** Pointed position, normalized 0..1 in frame space. Only used together with frame. */
+  point?: { x: number; y: number } | null;
 }
 
-/** provider = who answered; fallback = why Gemini was skipped, when Meta answered in auto mode. */
+/**
+ * provider = who answered; fallback = why Gemini was skipped, when Meta answered in auto mode;
+ * image = the frame was sent to (and answered by) Gemini.
+ */
 export type CommandResponse =
-  | { command: Command; ms: number; provider: CommandProvider; fallback?: string }
+  | { command: Command; ms: number; provider: CommandProvider; fallback?: string; image?: boolean }
   | { error: string };
+
+// ---- Named-object segmentation (POST /api/segment-named) ----
+
+export interface SegmentNamedRequest {
+  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 768px. */
+  frame: string;
+  /** Object to find, e.g. "tree", "taller bottle". */
+  name: string;
+}
+
+/** One found instance, all coordinates normalized 0..1 in frame space. */
+export interface NamedInstance {
+  label: string;
+  box: { x0: number; y0: number; x1: number; y1: number };
+  /** Mask as one or more filled polygons of [x, y] points; null = box only (the default, see proxy). */
+  polygons: [number, number][][] | null;
+}
+
+export type SegmentNamedResponse = { instances: NamedInstance[]; ms: number } | { error: string };
 
 /** JSON Schema handed to Gemini as response_format.schema. */
 export const COMMAND_JSON_SCHEMA = {

@@ -3,6 +3,7 @@ import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { resolveSelection, segmentPointed } from "../vision/select";
+import { frameJpeg } from "../vision/frameJpeg";
 import { feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
@@ -408,9 +409,15 @@ export default function Stage() {
     timeline.setLabel(JSON.stringify(transcript));
     setVoiceStatus(`"${transcript}" · parsing...`);
     try {
-      const { command, ms, provider, fallback } = await parseCommand(transcript, lastEditRef.current);
-      const via = fallback ? `${provider} (fallback)` : provider;
+      // Frozen: Gemini also gets the original frame and the pointed position (normalized).
+      const original = historyRef.current.original;
+      const p = pointRef.current;
+      const frame = original ? frameJpeg(original) : undefined;
+      const point = original && p ? { x: p.x / original.width, y: p.y / original.height } : null;
+      const { command, ms, provider, fallback, image } = await parseCommand(transcript, lastEditRef.current, frame, point);
+      const via = `${fallback ? `${provider} (fallback)` : provider}${image ? " +image" : frame ? " text-only" : ""}`;
       if (fallback) console.warn("[voice] gemini fallback:", fallback);
+      if (frame) console.log(`[voice] parse ${ms}ms, ${image ? "with image" : "image not used"} (${Math.round(frame.length / 1024)}kB b64)`);
       timeline.mark("command parsed");
       console.log("[voice]", transcript, command);
       // Only wait if a hand-mode point is genuinely still segmenting; otherwise dispatch now.

@@ -2,14 +2,17 @@
 // The Gemini key never leaves the server.
 import type { Command, CommandProvider, CommandRequest, CommandResponse } from "./schema";
 
+/** frame/point (normalized 0..1) are optional: with them Gemini also sees the frozen frame. */
 export async function parseCommand(
   transcript: string,
   previous: Command | null,
-): Promise<{ command: Command; ms: number; provider: CommandProvider; fallback?: string }> {
+  frame?: string,
+  point?: { x: number; y: number } | null,
+): Promise<{ command: Command; ms: number; provider: CommandProvider; fallback?: string; image?: boolean }> {
   const res = await fetch("/api/command", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ transcript, previous } satisfies CommandRequest),
+    body: JSON.stringify({ transcript, previous, frame, point } satisfies CommandRequest),
   });
   let body: CommandResponse;
   try {
