@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
-import { startGlassesSource, stopGlassesSource } from "../input/glassesSource";
+import { probeGlassesRelay, startGlassesSource, stopGlassesSource } from "../input/glassesSource";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
@@ -103,6 +103,8 @@ export default function Stage() {
   const [deviceId, setDeviceId] = useState<string | undefined>();
   // Video source: the webcam, or the iPhone glasses relay (Meta DAT Mock Device Kit).
   const [source, setSource] = useState<"webcam" | "glasses">("webcam");
+  // The relay only exists next to `npm run dev` (not on Vercel); the option shows once its WebSocket answers.
+  const [relayAvailable, setRelayAvailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
   const [point, setPoint] = useState<Point | null>(null);
@@ -173,6 +175,10 @@ export default function Stage() {
   // Preload FaceLandmarker so the first "change my nose" doesn't wait on the model download.
   useEffect(() => {
     initFace().catch((e) => console.warn("[face] init failed", e));
+  }, []);
+
+  useEffect(() => {
+    probeGlassesRelay().then(setRelayAvailable);
   }, []);
 
   // Start / switch camera (or the glasses relay)
@@ -1366,9 +1372,13 @@ export default function Stage() {
           <input type="checkbox" checked={mirror} onChange={(e) => setMirror(e.target.checked)} />
           Mirror view
         </label>
-        <select value={source} onChange={(e) => switchSource(e.target.value as "webcam" | "glasses")}>
+        <select
+          value={source}
+          onChange={(e) => switchSource(e.target.value as "webcam" | "glasses")}
+          onFocus={() => !relayAvailable && probeGlassesRelay().then(setRelayAvailable)}
+        >
           <option value="webcam">Webcam</option>
-          <option value="glasses">Glasses relay</option>
+          {(relayAvailable || source === "glasses") && <option value="glasses">Glasses relay</option>}
         </select>
         {source === "webcam" && cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>

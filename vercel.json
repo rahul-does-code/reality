@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "node scripts/setup.mjs && npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/edit.ts": { "maxDuration": 60 },
+    "api/aimask.ts": { "maxDuration": 60 },
+    "api/transcribe.ts": { "maxDuration": 60 },
+    "api/segment-text.ts": { "maxDuration": 60 }
+  }
+}

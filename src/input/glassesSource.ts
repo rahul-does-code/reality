@@ -34,6 +34,31 @@ export function defaultGlassesUrl(): string {
   return `${proto}://${location.hostname}:${GLASSES_RELAY_PORT}/glasses/ws`;
 }
 
+/**
+ * True if the relay's WebSocket opens within `timeoutMs`. False when there is no relay, e.g. on
+ * Vercel (static hosting + functions, no WebSockets), so the UI can hide the glasses source.
+ */
+export function probeGlassesRelay(url: string = defaultGlassesUrl(), timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      resolve(false);
+      return;
+    }
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      ws.onopen = ws.onerror = ws.onclose = null;
+      ws.close();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    ws.onopen = () => done(true);
+    ws.onerror = ws.onclose = () => done(false);
+  });
+}
+
 /** Frames drawn since the page loaded, the time of the last one, and its latencies (for fps/stall readouts). */
 export function glassesStats() {
   return { frames, lastFrameAt, latencyMs, relayLatencyMs };
