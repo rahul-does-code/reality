@@ -27,8 +27,12 @@ const MODES = (process.env.TEST_PROVIDERS ?? "gemini,meta").split(",").map((m) =
 
 const UTTERANCES = [
   "make that red",
-  "a little darker",
-  "more saturated",
+  // Adjusts of the recolor (Stage re-applies the recolor with the summed deltas).
+  ["a little darker", (c) => c.op === "adjust" && c.adjust?.brightness < 0],
+  ["more saturated", (c) => c.op === "adjust" && c.adjust?.saturation > 0],
+  ["less saturated", (c) => c.op === "adjust" && c.adjust?.saturation < 0],
+  ["darker", (c) => c.op === "adjust" && c.adjust?.brightness < 0],
+  ["a bit more blue", (c) => c.op === "adjust" && (c.adjust?.hue !== 0 || /blue/i.test(c.color ?? ""))],
   "do it again",
   "undo",
   "turn the mug baby blue",

@@ -11,7 +11,7 @@ import { bbox, coverage, feather, type Point } from "../vision/mask";
 import { combine, isClosed, selectStroke, type CombineMode } from "../vision/lasso";
 import { handHullInFrame, removeHand } from "../vision/handMask";
 import { StrokeRecognizer, type Gesture } from "../input/strokes";
-import { recolor } from "../edit/recolor";
+import { hueOf, recolor, type RecolorAdjust } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
 import { composite, dimInside } from "../edit/composite";
 import { removeObject } from "../edit/remove";
@@ -72,6 +72,7 @@ export default function Stage() {
   const appliedRef = useRef<{
     op: "recolor" | "blur" | "remove" | "replace";
     color?: string;
+    adjust?: RecolorAdjust;
     intensity?: number;
     prompt?: string;
     what?: string;
@@ -84,6 +85,15 @@ export default function Stage() {
   // Last blur: the frame it was applied on, its mask, and every frame it produced, so an
   // intensity "adjust" right after re-blurs from the pre-blur frame instead of stacking.
   const lastBlurRef = useRef<{ base: ImageData; alpha: Float32Array; results: ImageData[] } | null>(null);
+  // Last recolor, the same idea for "darker"/"less saturated": every frame it (and adjusts of it)
+  // produced with its accumulated adjustment, so after an undo the next adjust builds on that step.
+  const lastRecolorRef = useRef<{
+    base: ImageData;
+    alpha: Float32Array;
+    color: string;
+    sel: NonNullable<CurrentSelection>;
+    results: { frame: ImageData; adj: RecolorAdjust }[];
+  } | null>(null);
   const modelBusyRef = useRef(false);
   // AI mask (vision + SAM) running in the background for the latest click/pinch. It only swaps in
   // while it is still this exact object: same gesture (reqId), frame and point. swap is idempotent.
@@ -112,6 +122,9 @@ export default function Stage() {
   const [mirror, setMirror] = useState(true);
   const [aiOn, setAiOn] = useState(getAiMask() === "always");
   const [aiPending, setAiPending] = useState(false);
+  // Hold B: the original frozen frame on a layer above the edit (display only, history untouched).
+  const compareRef = useRef<HTMLCanvasElement>(null);
+  const [comparing, setComparing] = useState(false);
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
   const pttRef = useRef<PushToTalkLike | null>(null);
@@ -425,7 +438,7 @@ export default function Stage() {
 
   /** Remember an applied edit with the selection it used (see appliedRef). */
   const recordEdit = useCallback(
-    (e: { op: "recolor" | "blur" | "remove" | "replace"; color?: string; intensity?: number; prompt?: string; what?: string }, before: ImageData) => {
+    (e: { op: "recolor" | "blur" | "remove" | "replace"; color?: string; adjust?: RecolorAdjust; intensity?: number; prompt?: string; what?: string }, before: ImageData) => {
       const mask = maskRef.current;
       const after = historyRef.current.current;
       if (!mask || !after) return;
@@ -439,12 +452,17 @@ export default function Stage() {
   );
 
   const recolorWith = useCallback(
-    (c: string): boolean => {
+    (c: string, adj?: RecolorAdjust): boolean => {
       const cur = historyRef.current.current;
       const a = alphaRef.current;
       if (!canvasRef.current || !cur || !a) return false;
-      pushFrame(recolor(cur, a, c));
-      recordEdit({ op: "recolor", color: c }, cur);
+      const out = recolor(cur, a, c, adj);
+      pushFrame(out);
+      recordEdit({ op: "recolor", color: c, adjust: adj }, cur);
+      const sel = appliedRef.current?.sel;
+      lastRecolorRef.current = sel
+        ? { base: cur, alpha: a, color: c, sel, results: [{ frame: out, adj: adj ?? { saturation: 0, brightness: 0, hue: 0 } }] }
+        : null;
       return true;
     },
     [pushFrame, recordEdit],
@@ -630,7 +648,7 @@ export default function Stage() {
         applySelection(sel, original, "scope");
         timeline?.mark("selection resolved");
         let result: string;
-        if (last.op === "recolor") result = recolorWith(last.color!) ? `recolored ${last.color}` : "recolor failed";
+        if (last.op === "recolor") result = recolorWith(last.color!, last.adjust) ? `recolored ${last.color}` : "recolor failed";
         else if (last.op === "blur") {
           blurWith(last.before, alphaRef.current!, last.intensity ?? DEFAULT_BLUR);
           result = `blurred ${Math.round((last.intensity ?? DEFAULT_BLUR) * 100)}%`;
@@ -694,8 +712,34 @@ export default function Stage() {
             if (!isRetry) lastEditRef.current = cmd;
             return `blur → ${Math.round(Math.min(1, Math.max(0, cmd.intensity)) * 100)}%`;
           }
+          // "darker"/"less saturated"/"a bit more blue" right after a recolor (or an adjust of it):
+          // recolor again from the pre-recolor frame, same color and mask, with the summed deltas.
+          const rec = lastRecolorRef.current;
+          const step = rec && cur ? rec.results.find((r) => r.frame === cur) : undefined;
+          if (rec && step && (cmd.adjust || cmd.color)) {
+            const d = cmd.adjust ?? { saturation: 0, brightness: 0, hue: 0 };
+            let hue = step.adj.hue + d.hue;
+            // A named color ("a bit more blue") with no hue delta: move 30% of the way to its hue.
+            if (cmd.color && CSS.supports("color", cmd.color) && !d.hue) {
+              const diff = ((((hueOf(cmd.color) - hueOf(rec.color) - hue) % 360) + 540) % 360) - 180;
+              hue += diff * 0.3;
+            }
+            const clamp1 = (v: number) => Math.min(1, Math.max(-1, v));
+            const adj = {
+              saturation: clamp1(step.adj.saturation + d.saturation),
+              brightness: clamp1(step.adj.brightness + d.brightness),
+              hue: ((((hue + 180) % 360) + 360) % 360) - 180,
+            };
+            const out = recolor(rec.base, rec.alpha, rec.color, adj);
+            pushFrame(out);
+            rec.results.push({ frame: out, adj });
+            appliedRef.current = { op: "recolor", color: rec.color, adjust: adj, before: rec.base, after: out, sel: rec.sel };
+            if (!isRetry) lastEditRef.current = cmd;
+            const pct = (v: number) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`;
+            return `${rec.color}: saturation ${pct(adj.saturation)}, brightness ${pct(adj.brightness)}, hue ${Math.round(adj.hue)}°`;
+          }
           console.log("[voice] adjust not implemented for this edit yet:", cmd);
-          return "adjust only works right after a blur for now";
+          return "adjust only works right after a blur or a recolor";
         }
         case "remove":
         case "replace": {
@@ -710,7 +754,7 @@ export default function Stage() {
         }
       }
     },
-    [undo, recolorWith, blurWith, modelOp, clearSelection, applySelection],
+    [undo, recolorWith, blurWith, modelOp, clearSelection, applySelection, pushFrame],
   );
   // The parse is async, so call through a ref to get the dispatch with current state.
   const dispatchRef = useRef(dispatch);
@@ -999,7 +1043,65 @@ export default function Stage() {
     ctx.putImageData(img, 0, 0);
   }, [alpha, showMask, frozen, size]);
 
-  // Keyboard: Space = freeze/resume, U = undo, R = recolor
+  const startCompare = useCallback(() => {
+    const original = historyRef.current.original;
+    const c = compareRef.current;
+    if (!original || !c) return;
+    c.width = original.width;
+    c.height = original.height;
+    c.getContext("2d")!.putImageData(original, 0, 0);
+    setComparing(true);
+  }, []);
+  const stopCompare = useCallback(() => setComparing(false), []);
+
+  // Hold B to see the original. Releasing outside the window (blur) also ends it.
+  useEffect(() => {
+    const isB = (e: KeyboardEvent) => e.key.toLowerCase() === "b";
+    const onDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (isB(e) && !e.repeat && tag !== "SELECT" && tag !== "INPUT") startCompare();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (isB(e)) stopCompare();
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", stopCompare);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", stopCompare);
+    };
+  }, [startCompare, stopCompare]);
+
+  /** Download the current frame (the edit when frozen, the camera when live) as a PNG, unmirrored. */
+  const saveImage = useCallback(() => {
+    const frame = historyRef.current.current;
+    const video = videoRef.current;
+    const c = document.createElement("canvas");
+    if (frame) {
+      c.width = frame.width;
+      c.height = frame.height;
+      c.getContext("2d")!.putImageData(frame, 0, 0);
+    } else if (video?.videoWidth) {
+      c.width = video.videoWidth;
+      c.height = video.videoHeight;
+      c.getContext("2d")!.drawImage(video, 0, 0);
+    } else {
+      showToast("No frame to save yet");
+      return;
+    }
+    c.toBlob((blob) => {
+      if (!blob) return showToast("Save failed: couldn't encode the PNG");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `reality-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }, "image/png");
+  }, [showToast]);
+
+  // Keyboard: Space = freeze/resume, U = undo, R = recolor, S = save image
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -1010,6 +1112,7 @@ export default function Stage() {
       } else if (e.key === "Escape") clearSelection();
       else if (e.key.toLowerCase() === "u") undo();
       else if (e.key.toLowerCase() === "r") applyRecolor();
+      else if (e.key.toLowerCase() === "s" && !e.repeat) saveImage();
       else if (e.key.toLowerCase() === "f") {
         const p = document.fullscreenElement ? document.exitFullscreen() : wrapRef.current?.requestFullscreen();
         p?.catch((err) => showToast(`Fullscreen failed: ${err instanceof Error ? err.message : String(err)}`));
@@ -1017,7 +1120,7 @@ export default function Stage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [frozen, freeze, resume, undo, applyRecolor, clearSelection, showToast]);
+  }, [frozen, freeze, resume, undo, applyRecolor, clearSelection, showToast, saveImage]);
 
   // Last-resort net: any async failure nobody caught becomes a toast instead of a silent console error.
   useEffect(() => {
@@ -1092,6 +1195,7 @@ export default function Stage() {
           />
           <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
           <canvas ref={strokeRef} width={size.w} height={size.h} className="layer" style={{ pointerEvents: "none" }} />
+          <canvas ref={compareRef} className="layer" style={{ pointerEvents: "none", display: frozen && comparing ? "block" : "none" }} />
           {frozen && point && (
             <div
               className="marker"
@@ -1118,7 +1222,7 @@ export default function Stage() {
         )}
         {error && <div className="error">{error}</div>}
         <div className="badge">
-          {frozen ? "FROZEN" : "LIVE"}
+          {frozen ? (comparing ? "ORIGINAL" : "FROZEN") : "LIVE"}
           {busy ? " · …" : ""}
           {aiPending ? " · AI mask..." : ""}
         </div>
@@ -1177,6 +1281,18 @@ export default function Stage() {
         <button onClick={clearSelection} disabled={!alpha && !point}>
           Clear selection (Esc)
         </button>
+        <button
+          disabled={!frozen}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            startCompare();
+          }}
+          onPointerUp={stopCompare}
+          onPointerCancel={stopCompare}
+        >
+          Hold B: original
+        </button>
+        <button onClick={saveImage}>Save image (S)</button>
         <input
           type="color"
           value={color}
