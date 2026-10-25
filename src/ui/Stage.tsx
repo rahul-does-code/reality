@@ -412,7 +412,7 @@ export default function Stage() {
       // Frozen: Gemini also gets the original frame and the pointed position (normalized).
       const original = historyRef.current.original;
       const p = pointRef.current;
-      const frame = original ? frameJpeg(original) : undefined;
+      const frame = original ? frameJpeg(original, 512, 0.7) : undefined;
       const point = original && p ? { x: p.x / original.width, y: p.y / original.height } : null;
       const { command, ms, provider, fallback, image } = await parseCommand(transcript, lastEditRef.current, frame, point);
       const via = `${fallback ? `${provider} (fallback)` : provider}${image ? " +image" : frame ? " text-only" : ""}`;

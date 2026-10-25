@@ -23,6 +23,14 @@ const API_KEY = process.env.GEMINI_API_KEY;
 // Flash-Lite: ~3-5s here vs 25-45s for gemini-3.8-flash (which also rejects "minimal" thinking).
 const MODEL = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
 const THINKING = process.env.GEMINI_THINKING ?? "minimal";
+// Per-image token budget for the command frame (docs: media resolution; Gemini 3 default = 1120
+// tokens, low = 280). Pixel size doesn't change it: 768px and 512px frames both cost 1100 tokens.
+// low measured ~15% faster on a real webcam frame and still resolved "taller"/"left" references.
+const RESOLUTIONS = ["low", "medium", "high", "ultra_high"] as const;
+type Resolution = (typeof RESOLUTIONS)[number];
+const asResolution = (v: unknown): Resolution | undefined =>
+  RESOLUTIONS.includes(v as Resolution) ? (v as Resolution) : undefined;
+const COMMAND_IMAGE_RESOLUTION = asResolution(process.env.GEMINI_COMMAND_IMAGE_RESOLUTION) ?? "low";
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
 // Command parsing: COMMAND_PROVIDER=auto (default: Gemini, then Muse Spark on 429/5xx/timeout/bad JSON),
@@ -151,6 +159,7 @@ app.post("/api/command", imageJson, async (req, res) => {
   const imageInput = frame
     ? {
         frame,
+        resolution: asResolution(body.imageResolution) ?? COMMAND_IMAGE_RESOLUTION,
         text:
           `${input}\nThe attached image is the frozen camera frame. ` +
           (point
@@ -214,7 +223,7 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-type ImageInput = { frame: string; text: string };
+type ImageInput = { frame: string; text: string; resolution?: Resolution };
 
 async function parseWith(provider: CommandProvider, input: string, image: ImageInput | null): Promise<Command> {
   const signal = AbortSignal.timeout(COMMAND_TIMEOUT_MS);
@@ -233,30 +242,52 @@ async function parseWith(provider: CommandProvider, input: string, image: ImageI
 
 async function commandTextFromGemini(input: string, image: ImageInput | null, signal: AbortSignal): Promise<string> {
   if (!API_KEY) throw new ProviderError(500, "GEMINI_API_KEY missing from .env");
-  const r = await fetch(GEMINI_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": API_KEY },
-    signal,
-    body: JSON.stringify({
-      model: MODEL,
-      system_instruction: SYSTEM_PROMPT,
-      // Docs (image understanding): text part, then the image part as base64 with its mime_type.
-      input: image
-        ? [
-            { type: "text", text: image.text },
-            { type: "image", mime_type: "image/jpeg", data: image.frame },
-          ]
-        : input,
-      store: false,
-      generation_config: { thinking_level: THINKING },
-      response_format: { type: "text", mime_type: "application/json", schema: COMMAND_JSON_SCHEMA },
-    }),
+  const t0 = performance.now();
+  const payload = JSON.stringify({
+    model: MODEL,
+    system_instruction: SYSTEM_PROMPT,
+    // Docs (image understanding): text part, then the image part as base64 with its mime_type.
+    input: image
+      ? [
+          { type: "text", text: image.text },
+          {
+            type: "image",
+            mime_type: "image/jpeg",
+            data: image.frame,
+            ...(image.resolution ? { resolution: image.resolution } : {}),
+          },
+        ]
+      : input,
+    store: false,
+    generation_config: { thinking_level: THINKING },
+    response_format: { type: "text", mime_type: "application/json", schema: COMMAND_JSON_SCHEMA },
   });
-  if (!r.ok) {
-    const detail = await r.text();
-    throw new ProviderError(r.status, `gemini ${r.status}: ${detail.slice(0, 300)}`);
+  const tag = image ? `image ${Math.round(image.frame.length / 1024)}kB b64 res=${image.resolution ?? "default"}` : "text";
+  try {
+    const r = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": API_KEY },
+      signal,
+      body: payload,
+    });
+    const headersMs = Math.round(performance.now() - t0);
+    if (!r.ok) {
+      const detail = await r.text();
+      throw new ProviderError(r.status, `gemini ${r.status}: ${detail.slice(0, 300)}`);
+    }
+    const json = (await r.json()) as Interaction;
+    const u = json.usage;
+    const imgTokens = u?.input_tokens_by_modality?.find((m) => m.modality === "image")?.tokens;
+    console.log(
+      `[gemini] ${tag}, payload ${Math.round(payload.length / 1024)}kB: response headers ${headersMs}ms, ` +
+        `body ${Math.round(performance.now() - t0)}ms; tokens in ${u?.total_input_tokens ?? "?"}` +
+        `${imgTokens !== undefined ? ` (image ${imgTokens})` : ""}, thought ${u?.total_thought_tokens ?? 0}, out ${u?.total_output_tokens ?? "?"}`,
+    );
+    return extractText(json);
+  } catch (e) {
+    if (isTimeout(e)) console.warn(`[gemini] ${tag}, payload ${Math.round(payload.length / 1024)}kB: timed out after ${Math.round(performance.now() - t0)}ms`);
+    throw e;
   }
-  return extractText(await r.json());
 }
 
 type ChatCompletion = { choices?: { message?: { content?: string | { type?: string; text?: string }[] | null } }[] };
@@ -587,7 +618,13 @@ app.post("/api/segment-named", imageJson, async (req, res) => {
 });
 
 type Block = { type?: string; text?: string; data?: string; mime_type?: string };
-type Interaction = { steps?: { type?: string; content?: Block[] }[]; output_image?: Block };
+type Usage = {
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_thought_tokens?: number;
+  input_tokens_by_modality?: { modality?: string; tokens?: number }[];
+};
+type Interaction = { steps?: { type?: string; content?: Block[] }[]; output_image?: Block; usage?: Usage };
 
 /** Last image block of the model output (what the SDK's `output_image` returns). */
 function extractImage(json: unknown): { data: string; mime: string } | null {

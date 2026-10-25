@@ -4,6 +4,24 @@
 // prints pass rate and latency per answering provider. Unchecked utterances pass if they parse.
 // Utterances run in order and each result becomes `previous` for the next, like a real session
 // (undo/retry don't replace the context, matching Stage.tsx).
+// Options: --frame <jpeg> sends that image with every utterance (like a frozen camera frame), with
+// --point x,y (normalized, default 0.5,0.5); --resolution low|medium|high|ultra_high overrides the
+// image token budget; --limit n runs only the first n utterances; --gap ms waits between calls (the
+// free tier allows 15 requests/minute per model: --gap 4500).
+import { readFileSync } from "node:fs";
+
+const arg = (name) => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i > 0 ? process.argv[i + 1] : undefined;
+};
+const FRAME = arg("frame") ? readFileSync(arg("frame")).toString("base64") : undefined;
+const [px, py] = (arg("point") ?? "0.5,0.5").split(",").map(Number);
+const POINT = FRAME ? { x: px, y: py } : undefined;
+const RESOLUTION = arg("resolution");
+const LIMIT = arg("limit") ? Number(arg("limit")) : Infinity;
+const GAP_MS = Number(arg("gap") ?? 0);
+if (FRAME) console.log(`frame ${arg("frame")}: ${Math.round(FRAME.length / 1024)}kB b64, point ${px},${py}, resolution ${RESOLUTION ?? "server default"}`);
+
 const BASE = process.env.PROXY_URL ?? "http://localhost:8787";
 const MODES = (process.env.TEST_PROVIDERS ?? "gemini,meta").split(",").map((m) => m.trim()).filter(Boolean);
 
@@ -33,7 +51,8 @@ async function runSuite(mode) {
   console.log(`\n=== provider ${mode} ===`);
   let previous = null;
   const rows = [];
-  for (const entry of UTTERANCES) {
+  for (const [i, entry] of UTTERANCES.slice(0, LIMIT).entries()) {
+    if (i && GAP_MS) await new Promise((r) => setTimeout(r, GAP_MS));
     const [transcript, check] = Array.isArray(entry) ? entry : [entry, null];
     const t0 = performance.now();
     let line;
@@ -43,7 +62,7 @@ async function runSuite(mode) {
       const res = await fetch(`${BASE}/api/command`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ transcript, previous, provider: mode }),
+        body: JSON.stringify({ transcript, previous, provider: mode, frame: FRAME, point: POINT, imageResolution: RESOLUTION }),
       });
       const body = await res.json();
       if (body.error) throw new Error(body.error);
@@ -58,6 +77,7 @@ async function runSuite(mode) {
       pass = !check || check(c);
       if (!pass) line = `MISMATCH ${line}`;
       if (body.fallback) line += `  [fallback: ${body.fallback.slice(0, 80)}]`;
+      if (FRAME && !body.image) line += "  [image not used]";
     } catch (e) {
       line = `ERROR ${e.message}`;
     }

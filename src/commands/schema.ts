@@ -60,10 +60,12 @@ export interface CommandRequest {
   previous: Command | null;
   /** Optional override of the server's COMMAND_PROVIDER. */
   provider?: CommandProvider | "auto";
-  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 768px. Gemini sees it; Meta stays text-only. */
+  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 512px. Gemini sees it; Meta stays text-only. */
   frame?: string;
   /** Pointed position, normalized 0..1 in frame space. Only used together with frame. */
   point?: { x: number; y: number } | null;
+  /** Test override of the server's GEMINI_COMMAND_IMAGE_RESOLUTION (per-image token budget). */
+  imageResolution?: "low" | "medium" | "high" | "ultra_high";
 }
 
 /**
