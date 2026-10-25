@@ -153,7 +153,7 @@ app.post("/api/command", imageJson, async (req, res) => {
   }
   const previous = body.previous ?? null;
   const input = `Previous command: ${previous ? JSON.stringify(previous) : "none"}\nUtterance: "${transcript}"`;
-  // Optional frozen frame (+ point) for Gemini; the Meta fallback stays text-only.
+  // Optional frozen frame (+ point), sent to whichever provider answers.
   const frame = typeof body.frame === "string" && body.frame ? body.frame : null;
   const point = frame && body.point && unit(body.point.x) && unit(body.point.y) ? body.point : null;
   const imageInput = frame
@@ -181,10 +181,10 @@ app.post("/api/command", imageJson, async (req, res) => {
       fallback = errorMessage(e);
       console.warn(`gemini failed (${fallback}), retrying with meta`);
       provider = "meta";
-      command = await parseWith(provider, input, null); // Meta is text-only
+      command = await parseWith(provider, input, imageInput);
     }
     const ms = Math.round(performance.now() - t0);
-    const image = provider === "gemini" && !!imageInput;
+    const image = !!imageInput;
     let imageNote = "";
     if (provider === "gemini") {
       const k = image ? "image" : "text";
@@ -195,6 +195,8 @@ app.post("/api/command", imageJson, async (req, res) => {
         const kb = Math.round(frame!.length / 1024);
         imageNote = ` +image ${kb}kB b64${textAvg !== null ? `, ~${ms - textAvg}ms over text-only avg ${textAvg}ms` : ", no text-only baseline yet"}`;
       }
+    } else if (image) {
+      imageNote = ` +image ${Math.round(frame!.length / 1024)}kB b64`;
     }
     console.log(`[${ms}ms ${provider}${fallback ? " fallback" : ""}${imageNote}] "${transcript}" -> ${JSON.stringify(command)}`);
     res.json({ command, ms, provider, ...(fallback ? { fallback } : {}), ...(image ? { image } : {}) } satisfies CommandResponse);
@@ -228,7 +230,7 @@ type ImageInput = { frame: string; text: string; resolution?: Resolution };
 async function parseWith(provider: CommandProvider, input: string, image: ImageInput | null): Promise<Command> {
   const signal = AbortSignal.timeout(COMMAND_TIMEOUT_MS);
   const text =
-    provider === "meta" ? await commandTextFromMeta(input, signal) : await commandTextFromGemini(input, image, signal);
+    provider === "meta" ? await commandTextFromMeta(input, image, signal) : await commandTextFromGemini(input, image, signal);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -292,7 +294,7 @@ async function commandTextFromGemini(input: string, image: ImageInput | null, si
 
 type ChatCompletion = { choices?: { message?: { content?: string | { type?: string; text?: string }[] | null } }[] };
 
-async function commandTextFromMeta(input: string, signal: AbortSignal): Promise<string> {
+async function commandTextFromMeta(input: string, image: ImageInput | null, signal: AbortSignal): Promise<string> {
   if (!META_API_KEY) throw new ProviderError(500, "META_API_KEY missing from .env");
   const r = await fetch(META_CHAT_URL, {
     method: "POST",
@@ -302,7 +304,17 @@ async function commandTextFromMeta(input: string, signal: AbortSignal): Promise<
       model: META_TEXT_MODEL,
       messages: [
         { role: "system", content: META_SYSTEM_PROMPT },
-        { role: "user", content: input },
+        // Docs (image understanding): images go in the user message as image_url parts; base64
+        // data URLs are accepted. No resolution/detail parameter is documented.
+        {
+          role: "user",
+          content: image
+            ? [
+                { type: "text", text: image.text },
+                { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.frame}` } },
+              ]
+            : input,
+        },
       ],
       reasoning_effort: META_REASONING_EFFORT,
       // Structured output (docs: /docs/structured-output). strict stays false: the schema uses

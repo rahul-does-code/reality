@@ -4,7 +4,8 @@ import { segmentAt, type SegResult } from "./segmenter";
 import { applyRegion, coverage, dilate, erode, feather, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 
-export type Selection = { mask: Uint8Array; alpha: Float32Array; note: string };
+/** label: what is selected, for the stage, e.g. "taller bottle (named)". */
+export type Selection = { mask: Uint8Array; alpha: Float32Array; note: string; label: string };
 
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
 let last: { frame: ImageData; x: number; y: number; job: Promise<SegResult> } | null = null;
@@ -136,35 +137,31 @@ export async function resolveSelection(
   const { width: w, height: h } = frame;
   const notes: string[] = [];
   let mask: Uint8Array;
+  let label = "pointed";
 
   if (select.refine && !select.region && previousMask) {
     mask = previousMask;
+    label = select.source === "named" && select.name ? `${select.name} (named)` : "selection";
   } else if (select.source === "face_part") {
     return { error: `face parts aren't supported yet (${select.face_part ?? "face"})` };
   } else if (select.source === "named") {
+    const name = select.name?.trim() || "that";
     const named = select.name ? await segmentNamed(frame, select.name, point) : { error: "no name given" };
-    if ("mask" in named) {
-      mask = named.mask;
-      notes.push(named.note);
-    } else {
-      // Fall back to the pointed segmentation, then the current selection.
-      console.warn(`[select] named "${select.name}" failed: ${named.error}`);
-      const why = `"${select.name}" not found (${named.error})`;
-      if (point) {
-        const res = await segmentPointed(frame, point);
-        mask = res.mask;
-        notes.push(`${why}, used point: ${res.source}`);
-      } else if (previousMask) {
-        mask = previousMask;
-        notes.push(`${why}, used selection`);
-      } else return { error: `${why}: point at it instead` };
+    // No fallback to the point or the current selection: editing the wrong thing is worse than nothing.
+    if (!("mask" in named)) {
+      console.warn(`[select] named "${name}" failed: ${named.error}`);
+      return { error: `Couldn't find '${name}' - try again or point at it.` };
     }
+    mask = named.mask;
+    notes.push(named.note);
+    label = `${name} (named)`;
   } else if (point) {
     const res = await segmentPointed(frame, point);
     mask = res.mask;
     notes.push(res.source + (res.note ? ` (${res.note})` : ""));
   } else if (previousMask) {
     mask = previousMask;
+    label = "selection"; // Stage keeps the current label
   } else {
     return { error: "point at (click) an object first" };
   }
@@ -183,5 +180,5 @@ export async function resolveSelection(
     } else notes.push("too small to shrink");
   }
   if (coverage(mask) === 0) return { error: "selection is empty" };
-  return { mask, alpha: feather(mask, w, h, 3), note: notes.join(" · ") };
+  return { mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label };
 }

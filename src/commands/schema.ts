@@ -60,7 +60,7 @@ export interface CommandRequest {
   previous: Command | null;
   /** Optional override of the server's COMMAND_PROVIDER. */
   provider?: CommandProvider | "auto";
-  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 512px. Gemini sees it; Meta stays text-only. */
+  /** Frozen frame, JPEG base64 (no data: prefix), long side <= 512px. Sent to Gemini and to the Meta fallback. */
   frame?: string;
   /** Pointed position, normalized 0..1 in frame space. Only used together with frame. */
   point?: { x: number; y: number } | null;
@@ -70,7 +70,7 @@ export interface CommandRequest {
 
 /**
  * provider = who answered; fallback = why Gemini was skipped, when Meta answered in auto mode;
- * image = the frame was sent to (and answered by) Gemini.
+ * image = the frame was sent to the provider that answered.
  */
 export type CommandResponse =
   | { command: Command; ms: number; provider: CommandProvider; fallback?: string; image?: boolean }

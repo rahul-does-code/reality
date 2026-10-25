@@ -4,7 +4,7 @@ import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { resolveSelection, segmentPointed } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
-import { feather, type Point } from "../vision/mask";
+import { bbox, feather, type Point } from "../vision/mask";
 import { recolor } from "../edit/recolor";
 import { blurMasked, DEFAULT_BLUR } from "../edit/blur";
 import { composite, dimInside } from "../edit/composite";
@@ -18,7 +18,7 @@ import { PushToTalk, speechSupported } from "../input/speech";
 import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
 import { emitMouse, pointer, usePointerSamples, type PointerSource } from "../input/pointer";
 import { parseCommand } from "../commands/geminiParse";
-import type { Command } from "../commands/schema";
+import type { Command, Select } from "../commands/schema";
 
 const SWATCHES = ["#ff3ca0", "#e5322d", "#2f6bff", "#22b55e", "#ffd21f", "#8a3ffc"];
 
@@ -45,6 +45,9 @@ export default function Stage() {
   const [error, setError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
   const [point, setPoint] = useState<Point | null>(null);
+  // Label chip over a voice-resolved selection (e.g. "taller bottle (named)"); x, y = top center of
+  // the mask in 0..1 frame coords. Pointed selections show the marker instead.
+  const [selTag, setSelTag] = useState<{ text: string; x: number; y: number } | null>(null);
   const [size, setSize] = useState({ w: 1280, h: 720 });
   const [depth, setDepth] = useState(0);
 
@@ -129,6 +132,7 @@ export default function Stage() {
     pointRef.current = null;
     segPromiseRef.current = null;
     setPoint(null);
+    setSelTag(null);
     setAlpha(null);
     setBusy(false);
     setSegInfo((s) => (s.startsWith("model failed") ? s : ""));
@@ -175,6 +179,7 @@ export default function Stage() {
     alphaRef.current = null;
     maskRef.current = null;
     setAlpha(null);
+    setSelTag(null);
     const job = segmentPointed(original, p).then((res) => {
       if (id !== reqId.current) return; // a newer click or a resume superseded this one
       const a = feather(res.mask, original.width, original.height, 3);
@@ -318,13 +323,21 @@ export default function Stage() {
           : !alphaRef.current
             ? "point at (click) an object first"
             : null;
-      // A voice `select` replaces the current selection before the op runs on it.
-      if (cmd.select && cmd.op !== "undo" && cmd.op !== "retry") {
+      // An edit on a named target with no select is looked up by name too, never applied to
+      // whatever happens to be selected.
+      const select: Select | null =
+        cmd.select ??
+        (cmd.target === "named" && cmd.target_name && ["recolor", "blur", "remove", "replace"].includes(cmd.op)
+          ? { source: "named", name: cmd.target_name, face_part: null, region: null, refine: null }
+          : null);
+      // A voice `select` replaces the current selection before the op runs on it. On failure
+      // (e.g. a name that isn't found) nothing changes: no edit, and the old selection stays.
+      if (select && cmd.op !== "undo" && cmd.op !== "retry") {
         const original = historyRef.current.original;
         if (!original) return "freeze the frame first (Space)";
         const id = ++reqId.current;
         setBusy(true);
-        const sel = await resolveSelection(cmd.select, original, pointRef.current, maskRef.current);
+        const sel = await resolveSelection(select, original, pointRef.current, maskRef.current);
         if (id !== reqId.current) return "selection superseded by a new point";
         setBusy(false);
         if ("error" in sel) return sel.error;
@@ -332,10 +345,21 @@ export default function Stage() {
         alphaRef.current = sel.alpha;
         setAlpha(sel.alpha);
         setSegInfo(`select · ${sel.note}`);
+        const { width: w, height: h } = original;
+        const b = bbox(sel.mask, w, h);
+        const at = b ? { x: (b.x + b.w / 2) / w, y: b.y / h } : null;
+        if (sel.label === "selection") setSelTag((t) => (t && at ? { ...t, ...at } : t));
+        else setSelTag(sel.label !== "pointed" && at ? { text: sel.label, ...at } : null);
+        if (select.source === "named") {
+          // The mask now comes from the name, so the old point no longer describes the selection.
+          pointRef.current = null;
+          segPromiseRef.current = null;
+          setPoint(null);
+        }
         timeline?.mark("selection resolved");
         if (cmd.op === "select") {
           if (!isRetry) lastEditRef.current = cmd;
-          return `selected${sel.note ? ` (${sel.note})` : ""}`;
+          return `selected ${sel.label}${sel.note ? ` (${sel.note})` : ""}`;
         }
       }
       switch (cmd.op) {
@@ -358,9 +382,7 @@ export default function Stage() {
           if (!recolorWith(cmd.color)) return "recolor failed";
           if (/^#[0-9a-f]{6}$/i.test(cmd.color)) setColor(cmd.color);
           if (!isRetry) lastEditRef.current = cmd;
-          // Named targets aren't segmented by name yet; the current selection stands in.
-          const note = !cmd.select && cmd.target === "named" && cmd.target_name ? ` (used selection for "${cmd.target_name}")` : "";
-          return `recolored ${cmd.color}${note}`;
+          return `recolored ${cmd.color}`;
         }
         case "blur": {
           const missing = needSelection();
@@ -415,7 +437,7 @@ export default function Stage() {
       const frame = original ? frameJpeg(original, 512, 0.7) : undefined;
       const point = original && p ? { x: p.x / original.width, y: p.y / original.height } : null;
       const { command, ms, provider, fallback, image } = await parseCommand(transcript, lastEditRef.current, frame, point);
-      const via = `${fallback ? `${provider} (fallback)` : provider}${image ? " +image" : frame ? " text-only" : ""}`;
+      const via = `${provider}${image ? " +image" : frame ? " text-only" : ""}${fallback ? " (fallback)" : ""}`;
       if (fallback) console.warn("[voice] gemini fallback:", fallback);
       if (frame) console.log(`[voice] parse ${ms}ms, ${image ? "with image" : "image not used"} (${Math.round(frame.length / 1024)}kB b64)`);
       timeline.mark("command parsed");
@@ -610,7 +632,9 @@ export default function Stage() {
       ? "segmenting..."
       : point
         ? `point (${point.x}, ${point.y}) · ${segInfo}`
-        : "click an object";
+        : selTag
+          ? `selected: ${selTag.text} · ${segInfo}`
+          : "click an object";
 
   return (
     <div className="stage-wrap">
@@ -657,6 +681,15 @@ export default function Stage() {
           <div ref={cursorRef} className="hand-cursor" />
           {showHud && handMode && <div ref={rawDotRef} className="hand-raw" />}
         </div>
+        {/* Outside the mirrored layer so the text reads normally; x is mirrored by hand. */}
+        {frozen && selTag && alpha && (
+          <div
+            className="sel-label"
+            style={{ left: `${(mirror ? 1 - selTag.x : selTag.x) * 100}%`, top: `max(${selTag.y * 100}%, 30px)` }}
+          >
+            {selTag.text}
+          </div>
+        )}
         {error && <div className="error">Camera error: {error}</div>}
         <div className="badge">
           {frozen ? "FROZEN" : "LIVE"}
