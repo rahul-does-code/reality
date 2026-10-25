@@ -1,7 +1,6 @@
 // Tiny API proxy so API keys (GEMINI_API_KEY, META_API_KEY) stay server-side. Vite proxies /api/* here in dev.
 // Run: npx tsx server/proxy.ts   (or `npm run dev:all` for this + Vite)
 import "dotenv/config";
-import "./routes/glassesRelay"; // starts the glasses frame relay on :8788 (ws ingest + MJPEG)
 import express from "express";
 import cors from "cors";
 import {
@@ -19,6 +18,11 @@ import {
   type SegmentNamedResponse,
 } from "../src/commands/schema";
 import { noteGeminiStatus } from "./geminiCooldown";
+
+// deploy/server.ts sets PROXY_EMBEDDED=1 to mount this app behind its own CORS, rate limits and dist/ serving.
+const EMBEDDED = process.env.PROXY_EMBEDDED === "1";
+// Starts the glasses frame relay on :8788 (ws ingest + MJPEG); GLASSES_RELAY=off skips it.
+if (process.env.GLASSES_RELAY !== "off") await import("./routes/glassesRelay");
 
 const PORT = Number(process.env.PROXY_PORT ?? 8787);
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -147,8 +151,8 @@ const META_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
 
 Output format: reply with exactly one JSON object with the keys op, target, target_name, color, adjust, prompt, intensity, select. No markdown, no code fences, no text before or after the JSON.`;
 
-const app = express();
-app.use(cors());
+export const app = express();
+if (!EMBEDDED) app.use(cors());
 const imageJson = express.json({ limit: "8mb" });
 app.use((await import("./routes/transcribe")).transcribeRouter); // POST /api/transcribe (Muse Voice)
 app.use((await import("./routes/aimask")).aimaskRouter); // POST /api/aimask (vision + SAM 3.1 for pointed masks)
@@ -681,7 +685,7 @@ function extractText(json: unknown): string {
     .join("");
 }
 
-app.listen(PORT, (err?: Error) => {
+if (!EMBEDDED) app.listen(PORT, (err?: Error) => {
   // Express 5 reports listen errors (e.g. EADDRINUSE) here instead of throwing.
   if (err) {
     console.error(`proxy failed to listen on :${PORT}: ${err.message}`);

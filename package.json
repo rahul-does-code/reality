@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host",
     "build": "tsc --noEmit && vite build",
+    "build:prod": "node scripts/setup.mjs && npm run build",
     "preview": "vite preview --host",
+    "start:prod": "NODE_ENV=production node --import tsx deploy/server.ts",
     "server": "tsx watch server/proxy.ts",
     "dev:all": "concurrently -k -n web,api -c magenta,cyan \"npm:dev\" \"npm:server\"",
     "test:commands": "node scripts/test-commands.mjs",
