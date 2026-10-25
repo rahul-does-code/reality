@@ -5,6 +5,7 @@ import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, re
 import { frameJpeg } from "./frameJpeg";
 import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
 import { aiSegmentWithin, getAiMask } from "./aiMask";
+import { isClothing, segmentClothing } from "./clothing";
 
 /**
  * mask: what edits apply to. subject: the same before any inversion, so "the background" is always
@@ -23,7 +24,7 @@ export type Selection = {
 };
 
 /** The selection a command starts from (Stage's current one, or the mask the last edit used). */
-export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: string } | null;
+export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: string; pointed?: boolean } | null;
 
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
 let last: { frame: ImageData; x: number; y: number; allowLarge: boolean; job: Promise<SegResult> } | null = null;
@@ -218,15 +219,28 @@ export async function resolveSelection(
     inverted = true;
   } else if (select.source === "named") {
     const name = select.name?.trim() || "that";
-    const named = select.name ? await segmentNamed(frame, select.name, point) : { error: "no name given" };
-    // No fallback to the point or the current selection: editing the wrong thing is worse than nothing.
-    if (!("mask" in named)) {
-      console.warn(`[select] named "${name}" failed: ${named.error}`);
-      return { error: notFound(name) };
+    const clothing = !!select.name && isClothing(select.name);
+    if (clothing && current?.pointed && !select.invert) {
+      // "turn my shirt pink" while pointing at it: the pointed mask is the user's own choice.
+      base = current.mask;
+      label = current.label;
+      source = "selection";
+      notes.push(`pointed selection kept for "${name}" · mask ${(coverage(base) * 100).toFixed(1)}% of frame`);
+    } else {
+      const named = !select.name
+        ? { error: "no name given" }
+        : clothing
+          ? await segmentClothing(frame, select.name, point)
+          : await segmentNamed(frame, select.name, point);
+      // No fallback to the point or the current selection: editing the wrong thing is worse than nothing.
+      if (!("mask" in named)) {
+        console.warn(`[select] named "${name}" failed: ${named.error}`);
+        return { error: notFound(name) };
+      }
+      base = named.mask;
+      notes.push(named.note);
+      label = `${name} (named)`;
     }
-    base = named.mask;
-    notes.push(named.note);
-    label = `${name} (named)`;
   } else if (point) {
     // Only a command about the background/inverse may pick a mask covering most of the frame.
     // AI mask (vision + SAM, see aiMask.ts) if it arrives within AI_MASK_WAIT_MS, else the MediaPipe one.

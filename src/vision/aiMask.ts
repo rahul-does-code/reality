@@ -50,7 +50,7 @@ export function sane(mask: Uint8Array, w: number, h: number, p: Point, allowLarg
 }
 
 /** A SAM raster (covering its box, possibly downscaled) -> binary mask at frame size. */
-export function samToMask(inst: AiSamInstance, w: number, h: number): Uint8Array {
+export function samToMask(inst: Pick<AiSamInstance, "bits" | "box" | "rw" | "rh">, w: number, h: number): Uint8Array {
   const bin = atob(inst.bits);
   const out = new Uint8Array(w * h);
   const x0 = Math.max(0, Math.floor(inst.box.x0 * w));

@@ -626,7 +626,13 @@ export default function Stage() {
       };
       const current = (): CurrentSelection =>
         maskRef.current
-          ? { mask: maskRef.current, subject: subjectRef.current ?? maskRef.current, label: labelRef.current ?? "selection" }
+          ? {
+              mask: maskRef.current,
+              subject: subjectRef.current ?? maskRef.current,
+              label: labelRef.current ?? "selection",
+              // Made by a click, pinch or stroke (or a voice "pointed"), not looked up by name/face/background.
+              pointed: !!sourceRef.current && !/^(named|face_part|background|scope)/.test(sourceRef.current),
+            }
           : null;
 
       // "only the top half" right after an edit (and no new op): undo that edit, narrow the

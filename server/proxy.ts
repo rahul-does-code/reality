@@ -156,6 +156,7 @@ if (!EMBEDDED) app.use(cors());
 const imageJson = express.json({ limit: "8mb" });
 app.use((await import("./routes/transcribe")).transcribeRouter); // POST /api/transcribe (Muse Voice)
 app.use((await import("./routes/aimask")).aimaskRouter); // POST /api/aimask (vision + SAM 3.1 for pointed masks)
+app.use((await import("./routes/samtext")).samTextRouter); // POST /api/segment-text (SAM 3.1 text prompt, clothing)
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, model: MODEL, segmentModel: SEGMENT_MODEL, commandProvider: COMMAND_PROVIDER, metaTextModel: META_TEXT_MODEL, imageProvider: IMAGE_PROVIDER, imageModel: IMAGE_MODEL, editTimeoutMs: EDIT_TIMEOUT_MS });
