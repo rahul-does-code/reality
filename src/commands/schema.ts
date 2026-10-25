@@ -3,10 +3,11 @@
 
 export const OPS = ["recolor", "remove", "blur", "replace", "adjust", "undo", "retry", "select"] as const;
 export const TARGETS = ["pointed", "named"] as const;
-export const SELECT_SOURCES = ["pointed", "named", "face_part"] as const;
+export const SELECT_SOURCES = ["pointed", "named", "face_part", "background"] as const;
 export const FACE_PARTS = ["nose", "lips", "left_eye", "right_eye", "eyes", "eyebrows", "face", "hair"] as const;
 export const REGION_SIDES = ["top", "bottom", "left", "right", "center"] as const;
-export const REFINES = ["grow", "shrink"] as const;
+// clear = deselect; only = narrow what was just edited ("only the top half") and redo that edit.
+export const REFINES = ["grow", "shrink", "clear", "only"] as const;
 
 export type Op = (typeof OPS)[number];
 export type Target = (typeof TARGETS)[number];
@@ -23,12 +24,15 @@ export interface Region {
 
 /** What to select, separate from what to do with it (op). */
 export interface Select {
+  /** "background" = everything except the current selection. */
   source: SelectSource;
   /** For source "named", e.g. "tree", "mug". */
   name: string | null;
   face_part: FacePart | null;
   region: Region | null;
   refine: Refine | null;
+  /** Select everything except the result ("everything except the bottle"). */
+  invert: boolean;
 }
 
 /** Deltas applied to the previous edit. saturation/brightness in -1..1, hue in degrees -180..180. */
@@ -129,8 +133,9 @@ export const COMMAND_JSON_SCHEMA = {
           required: ["side", "fraction"],
         },
         refine: { type: ["string", "null"], enum: [...REFINES, null] },
+        invert: { type: "boolean", description: "true = everything except this" },
       },
-      required: ["source", "name", "face_part", "region", "refine"],
+      required: ["source", "name", "face_part", "region", "refine", "invert"],
     },
   },
   required: ["op", "target", "target_name", "color", "adjust", "prompt", "intensity", "select"],
@@ -161,6 +166,7 @@ function validateSelect(v: unknown): Select | null | string {
     face_part: face as FacePart | null,
     region,
     refine: refine as Refine | null,
+    invert: s.invert === true,
   };
 }
 

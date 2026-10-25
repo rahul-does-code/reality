@@ -1,11 +1,27 @@
 // SELECTION: a voice `select` + frame + point -> mask. Knows nothing about operations.
-import type { NamedInstance, Select, SegmentNamedResponse } from "../commands/schema";
+import type { NamedInstance, Select, SelectSource, SegmentNamedResponse } from "../commands/schema";
 import { segmentAt, type SegResult } from "./segmenter";
-import { applyRegion, coverage, dilate, erode, feather, refineRadius, type Point } from "./mask";
+import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 
-/** label: what is selected, for the stage, e.g. "taller bottle (named)". */
-export type Selection = { mask: Uint8Array; alpha: Float32Array; note: string; label: string };
+/**
+ * mask: what edits apply to. subject: the same before any inversion, so "the background" is always
+ * the inverse of the subject (saying it twice doesn't flip back). label: what is selected, e.g.
+ * "taller bottle (named)"; "pointed" for a plain point selection (the marker shows it). usedPoint:
+ * the mask was segmented at the stored point, so the marker still describes it.
+ */
+export type Selection = {
+  mask: Uint8Array;
+  subject: Uint8Array;
+  alpha: Float32Array;
+  note: string;
+  label: string;
+  source: SelectSource | "selection";
+  usedPoint: boolean;
+};
+
+/** The selection a command starts from (Stage's current one, or the mask the last edit used). */
+export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: string } | null;
 
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
 let last: { frame: ImageData; x: number; y: number; job: Promise<SegResult> } | null = null;
@@ -79,23 +95,58 @@ function rasterize(polygons: [number, number][][], w: number, h: number): Uint8A
   return out;
 }
 
-/** Keep only pixels inside the (pixel) box; a missing mask fills the whole box. */
-function clipToBox(mask: Uint8Array | null, box: NamedInstance["box"], w: number, h: number) {
-  const out = new Uint8Array(w * h);
-  for (let y = Math.max(0, Math.floor(box.y0 * h)); y < Math.min(h, Math.ceil(box.y1 * h)); y++) {
-    for (let x = Math.max(0, Math.floor(box.x0 * w)); x < Math.min(w, Math.ceil(box.x1 * w)); x++) {
-      out[y * w + x] = mask ? mask[y * w + x] : 1;
-    }
-  }
-  return out;
-}
+// Box -> mask results, per (frame, name, instance), so repeating a named command is instant.
+const boxMaskCache = new WeakMap<ImageData, Map<string, Promise<{ mask: Uint8Array; iou: number; sample: number } | null>>>();
+
+const SAMPLE_NAMES = ["center", "left", "right", "top", "bottom"];
 
 /**
- * Gemini finds `name` in the frame; the instance nearest the point becomes the mask. With only a box
- * (the default), the point segmenter runs inside it (at the point if it's in the box, else the box
- * center) and the result is clipped to the box.
+ * Segment at the box center and four points 25% of the box away from it, and keep the mask whose
+ * bounding box best matches Gemini's box (IoU). null if the segmenter produced nothing usable.
  */
-async function segmentNamed(frame: ImageData, name: string, p: Point | null): Promise<{ mask: Uint8Array; note: string } | { error: string }> {
+function maskForBox(frame: ImageData, key: string, box: NamedInstance["box"]) {
+  let byKey = boxMaskCache.get(frame);
+  if (!byKey) boxMaskCache.set(frame, (byKey = new Map()));
+  const hit = byKey.get(key);
+  if (hit) return hit;
+  const { width: w, height: h } = frame;
+  const px = { x: box.x0 * w, y: box.y0 * h, w: (box.x1 - box.x0) * w, h: (box.y1 - box.y0) * h };
+  const cx = px.x + px.w / 2;
+  const cy = px.y + px.h / 2;
+  const samples: Point[] = [
+    { x: cx, y: cy },
+    { x: cx - px.w * 0.25, y: cy },
+    { x: cx + px.w * 0.25, y: cy },
+    { x: cx, y: cy - px.h * 0.25 },
+    { x: cx, y: cy + px.h * 0.25 },
+  ];
+  const job = (async () => {
+    let best: { mask: Uint8Array; iou: number; sample: number } | null = null;
+    for (const [i, pt] of samples.entries()) {
+      const res = await segmentAt(frame, pt);
+      if (res.source !== "model") continue; // the circle fallback says nothing about the object
+      const b = bbox(res.mask, w, h);
+      const iou = b ? boxIoU(b, px) : 0;
+      if (!best || iou > best.iou) best = { mask: res.mask, iou, sample: i };
+    }
+    return best;
+  })();
+  byKey.set(key, job);
+  return job;
+}
+
+const MAX_BOX_AREA = 0.7; // a "found" box covering most of the frame is a guess, not a find
+const MIN_IOU = 0.4;
+
+/**
+ * Gemini finds `name` in the frame; the instance nearest the point (if any) is used. The stored
+ * point is only used to choose an instance, never as the segmentation prompt.
+ */
+async function segmentNamed(
+  frame: ImageData,
+  name: string,
+  p: Point | null,
+): Promise<{ mask: Uint8Array; note: string } | { error: string }> {
   const { width: w, height: h } = frame;
   const { job, cached } = findNamed(frame, name);
   let found: { instances: NamedInstance[]; ms: number };
@@ -106,6 +157,9 @@ async function segmentNamed(frame: ImageData, name: string, p: Point | null): Pr
   }
   if (!found.instances.length) return { error: "not in view" };
   const inst = nearest(found.instances, p ? { x: p.x / w, y: p.y / h } : null);
+  const { box } = inst;
+  const area = (box.x1 - box.x0) * (box.y1 - box.y0);
+  if (area > MAX_BOX_AREA) return { error: `box covers ${Math.round(area * 100)}% of the frame` };
   const of = found.instances.length > 1 ? ` (nearest of ${found.instances.length})` : "";
   const timing = cached ? "cached" : `gemini ${found.ms}ms`;
   const label = `"${inst.label || name}"${of} · ${timing}`;
@@ -113,72 +167,94 @@ async function segmentNamed(frame: ImageData, name: string, p: Point | null): Pr
     const mask = rasterize(inst.polygons, w, h);
     if (coverage(mask) > 0) return { mask, note: `${label} · gemini mask` };
   }
-  const { box } = inst;
-  const inBox = p && p.x >= box.x0 * w && p.x <= box.x1 * w && p.y >= box.y0 * h && p.y <= box.y1 * h;
-  const seed = inBox ? p : { x: ((box.x0 + box.x1) / 2) * w, y: ((box.y0 + box.y1) / 2) * h };
-  const res = await segmentPointed(frame, seed);
-  const clipped = res.source === "model" ? clipToBox(res.mask, box, w, h) : null;
-  const ok = clipped && coverage(clipped) > 0;
-  const mask = ok ? clipped : clipToBox(null, box, w, h);
-  return { mask, note: `${label} · ${ok ? `segmented in box at ${inBox ? "point" : "center"}` : "filled box"}` };
+  const key = `${name.trim().toLowerCase()}|${found.instances.indexOf(inst)}`;
+  const best = await maskForBox(frame, key, box);
+  if (!best || best.iou < MIN_IOU) return { error: `best mask/box IoU ${best ? best.iou.toFixed(2) : "none"} < ${MIN_IOU}` };
+  return { mask: best.mask, note: `${label} · IoU ${best.iou.toFixed(2)} (${SAMPLE_NAMES[best.sample]} sample)` };
 }
+
+export const notFound = (name: string) => `Couldn't find '${name}' - try again or point at it.`;
 
 /**
  * Resolve a `select` into a feathered alpha (plus the binary mask, for later refines).
- * `frame` must be the ORIGINAL frozen frame. `previousMask` is the current selection's binary
- * mask; a refine with no region applies to it, so "bigger" can be repeated.
+ * `frame` must be the ORIGINAL frozen frame. `current` is the selection to build on: refines,
+ * regions without a point, and "background" apply to it. refine "clear"/"only" are handled by
+ * Stage; here "only" behaves like no refine.
  */
 export async function resolveSelection(
   select: Select,
   frame: ImageData,
   point: Point | null,
-  previousMask: Uint8Array | null,
+  current: CurrentSelection,
 ): Promise<Selection | { error: string }> {
   const { width: w, height: h } = frame;
   const notes: string[] = [];
-  let mask: Uint8Array;
-  let label = "pointed";
+  const sizeRefine = select.refine === "grow" || select.refine === "shrink" ? select.refine : null;
+  let base: Uint8Array;
+  let label: string;
+  let source: Selection["source"] = select.source;
+  let usedPoint = false;
+  let inverted = select.invert;
 
-  if (select.refine && !select.region && previousMask) {
-    mask = previousMask;
-    label = select.source === "named" && select.name ? `${select.name} (named)` : "selection";
+  if (sizeRefine && !select.region && current) {
+    base = current.mask;
+    label = current.label;
+    source = "selection";
+    inverted = false; // grow/shrink what is selected now, inverted or not
   } else if (select.source === "face_part") {
     return { error: `face parts aren't supported yet (${select.face_part ?? "face"})` };
+  } else if (select.source === "background") {
+    if (!current) return { error: "Point at the subject first, then say 'blur the background'" };
+    base = current.subject;
+    label = current.label === "pointed" ? "the pointed object" : current.label;
+    inverted = true;
   } else if (select.source === "named") {
     const name = select.name?.trim() || "that";
     const named = select.name ? await segmentNamed(frame, select.name, point) : { error: "no name given" };
     // No fallback to the point or the current selection: editing the wrong thing is worse than nothing.
     if (!("mask" in named)) {
       console.warn(`[select] named "${name}" failed: ${named.error}`);
-      return { error: `Couldn't find '${name}' - try again or point at it.` };
+      return { error: notFound(name) };
     }
-    mask = named.mask;
+    base = named.mask;
     notes.push(named.note);
     label = `${name} (named)`;
   } else if (point) {
     const res = await segmentPointed(frame, point);
-    mask = res.mask;
+    base = res.mask;
+    usedPoint = true;
+    label = "pointed";
     notes.push(res.source + (res.note ? ` (${res.note})` : ""));
-  } else if (previousMask) {
-    mask = previousMask;
-    label = "selection"; // Stage keeps the current label
+  } else if (current) {
+    base = current.mask;
+    label = current.label;
+    source = "selection";
   } else {
     return { error: "point at (click) an object first" };
   }
 
   if (select.region) {
     const { side, fraction } = select.region;
-    mask = applyRegion(mask, w, h, side, fraction);
-    notes.push(`${side} ${Math.round(fraction * 100)}%`);
+    base = applyRegion(base, w, h, side, fraction);
+    const part = `${side} ${Math.round(fraction * 100)}%`;
+    notes.push(part);
+    label = label === "pointed" ? `pointed, ${part}` : `${label}, ${part}`;
   }
-  if (select.refine) {
-    const r = refineRadius(mask, w, h);
-    const out = select.refine === "grow" ? dilate(mask, w, h, r) : erode(mask, w, h, r);
+  if (sizeRefine) {
+    const r = refineRadius(base, w, h);
+    const out = sizeRefine === "grow" ? dilate(base, w, h, r) : erode(base, w, h, r);
     if (coverage(out) > 0) {
-      mask = out;
-      notes.push(`${select.refine} ${r}px`);
+      base = out;
+      notes.push(`${sizeRefine} ${r}px`);
     } else notes.push("too small to shrink");
   }
+  let mask = base;
+  if (inverted) {
+    mask = invert(base);
+    usedPoint = false; // the marker sits on the excluded object
+    label = select.source === "background" ? `background (except ${label})` : `everything except ${label}`;
+    notes.push("inverted");
+  }
   if (coverage(mask) === 0) return { error: "selection is empty" };
-  return { mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label };
+  return { mask, subject: base, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source, usedPoint };
 }

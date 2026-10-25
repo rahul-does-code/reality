@@ -96,7 +96,7 @@ Rules:
 - recolor: color is a CSS color name or #rrggbb hex. Map descriptive colors to hex (e.g. "baby blue" -> "#89cff0").
 - Refinements of the previous edit ("less", "more", "darker", "lighter", "brighter", "more saturated", "warmer", "a bit more blue") are op "adjust", with the same target as the previous command and adjust deltas: saturation and brightness in -1..1, hue in degrees -180..180. Use small steps (about 0.15-0.3) unless the user says "a lot" or "way". Fields that don't change are 0. For "less"/"more" of a blur, use op "adjust" with all deltas 0 and intensity set to the new strength.
 - "again", "one more time", "do it again", "redo" are op "retry" with the target copied from the previous command.
-- "undo", "go back", "never mind", "revert" are op "undo".
+- "undo", "go back", "revert" are op "undo". ("never mind" is a deselect, see below.)
 - blur: intensity 0..1 (default 0.6).
 - remove: erase the object and fill the background naturally.
 - replace: prompt is a self-contained image-edit instruction for an image model that will only see the image and this prompt. Describe what to put in place of the target, and explicitly say to preserve the scene's lighting, shadows, perspective and scale and leave everything else unchanged.
@@ -104,12 +104,16 @@ Rules:
 
 Selection (the "select" field says WHAT to edit; op says what to DO):
 - select is null when the user just points ("make that red", "get rid of this") or repeats/undoes/adjusts an edit. Then the current selection is used.
-- Otherwise select = { source, name, face_part, region, refine }, with null for parts that don't apply:
+- Otherwise select = { source, name, face_part, region, refine, invert }, with null for parts that don't apply and invert false unless stated below:
   - source "face_part" for the user's own face: face_part one of nose, lips, left_eye, right_eye, eyes, eyebrows, face, hair ("my mouth" -> lips, "my eyes" -> eyes).
   - source "named" when the user names an object to find in the scene: name is a short noun phrase without article ("the tree" -> "tree"). Also set target "named" and target_name.
   - source "pointed" when they point ("this", "that"), including with a region or refine.
+  - source "background" for "the background" / "behind me" / "everything else": everything except the current selection. name null, invert false. Never use source "named" with name "background".
+  - invert true for "everything except X" / "all but X" / "everything but this": select X as usual (named, pointed or face_part) and set invert true.
   - region { side: top|bottom|left|right|center, fraction 0..1 } keeps only part of the object: "top half" -> top 0.5, "left third" -> left 0.33, "the middle" -> center 0.5.
   - refine "grow" or "shrink" changes the size of the current selection: "a bit bigger", "grow it", "include more" -> grow; "smaller", "tighter", "less of it" -> shrink. Copy source, name and face_part from the previous command's select if it had one, else source "pointed"; region null.
+  - refine "clear" deselects: "deselect", "clear selection", "never mind", "select nothing" -> op select, select {source pointed, refine clear}, everything else null.
+  - refine "only" narrows to part of the current object: "only the top half", "just the left side", "only the handle", "only the top half of this can". Use op select (unless a new edit is also spoken) with either a region (source pointed) or, for a named part, source named with a name that says whose part it is ("mug handle"). The app re-applies the previous edit to just that part.
 - If the utterance only chooses or resizes what is selected and asks for no edit ("select the tree", "only the top half of this can", "a bit bigger", "change my nose"), op is "select" and color, adjust, prompt, intensity are null.
 - If it asks for an edit too ("make the top half of this can red", "blur my face"), use that op and fill select.
 - "bigger"/"smaller" are refine (op select), not adjust. adjust is only for color/brightness/strength of the previous edit.
@@ -120,7 +124,11 @@ Image (only when one is attached): it is the frozen frame the user is looking at
 
 Examples:
 - "change my nose" -> op select, select {source face_part, face_part nose}
-- "only the top half of this can" -> op select, target pointed, select {source pointed, region {side top, fraction 0.5}}
+- "only the top half of this can" -> op select, target pointed, select {source pointed, region {side top, fraction 0.5}, refine only}
+- "just the left side" (previous op recolor) -> op select, select {source pointed, region {side left, fraction 0.5}, refine only}
+- "blur the background" -> op blur, target named, target_name "background", intensity 0.6, select {source background, invert false}
+- "blur everything except the bottle" -> op blur, target named, target_name "bottle", intensity 0.6, select {source named, name "bottle", invert true}
+- "deselect" / "never mind" -> op select, select {source pointed, refine clear}
 - "select the tree" -> op select, target named, target_name "tree", select {source named, name "tree"}
 - "a bit bigger" (previous select {source named, name "tree"}) -> op select, select {source named, name "tree", refine grow}`;
 

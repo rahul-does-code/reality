@@ -192,3 +192,14 @@ export function refineRadius(mask: Uint8Array, w: number, h: number): number {
   if (!b) return 3;
   return clamp(Math.round(Math.min(b.w, b.h) * 0.03), 3, 6);
 }
+
+export type Box = { x: number; y: number; w: number; h: number };
+
+/** Intersection over union of two pixel boxes (0 if either is empty). */
+export function boxIoU(a: Box, b: Box): number {
+  const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+  const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+  const inter = ix * iy;
+  const union = a.w * a.h + b.w * b.h - inter;
+  return union > 0 ? inter / union : 0;
+}
