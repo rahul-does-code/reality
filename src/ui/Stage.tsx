@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
+import { startGlassesSource, stopGlassesSource } from "../input/glassesSource";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
@@ -83,6 +84,8 @@ export default function Stage() {
 
   const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [deviceId, setDeviceId] = useState<string | undefined>();
+  // Video source: the webcam, or the iPhone glasses relay (Meta DAT Mock Device Kit).
+  const [source, setSource] = useState<"webcam" | "glasses">("webcam");
   const [error, setError] = useState<string | null>(null);
   const [frozen, setFrozen] = useState(false);
   const [point, setPoint] = useState<Point | null>(null);
@@ -150,26 +153,32 @@ export default function Stage() {
     initFace().catch((e) => console.warn("[face] init failed", e));
   }, []);
 
-  // Start / switch camera
+  // Start / switch camera (or the glasses relay)
   useEffect(() => {
     const video = videoRef.current!;
     let cancelled = false;
     (async () => {
       try {
         setError(null);
+        if (source === "glasses") {
+          await startGlassesSource(video);
+          return;
+        }
         await startCamera(video, deviceId);
         if (cancelled) return;
         setCameras(await listCameras());
       } catch (e) {
         if (cancelled) return;
-        setError(permissionMessage("Camera", e));
+        if (source === "glasses") showToast(e instanceof Error ? e.message : String(e));
+        else setError(permissionMessage("Camera", e));
       }
     })();
     return () => {
       cancelled = true;
-      stopCamera(video);
+      if (source === "glasses") stopGlassesSource(video);
+      else stopCamera(video);
     };
-  }, [deviceId]);
+  }, [deviceId, source]);
 
   const clearSelection = useCallback(() => {
     reqId.current++; // invalidate any in-flight segmentation
@@ -402,6 +411,21 @@ export default function Stage() {
     // Long enough to read a provider's status + error body.
     setTimeout(() => setToast((m) => (m === msg ? null : m)), 12000);
   }, []);
+
+  // Glasses frames aren't a selfie view, so mirroring starts off there; the webcam gets its old setting back.
+  const mirrorBeforeGlassesRef = useRef(mirror);
+  const switchSource = useCallback(
+    (next: "webcam" | "glasses") => {
+      if (next === source) return;
+      if (frozen) resume(); // the frozen frame and its masks belong to the old source's size
+      if (next === "glasses") {
+        mirrorBeforeGlassesRef.current = mirror;
+        setMirror(false);
+      } else setMirror(mirrorBeforeGlassesRef.current);
+      setSource(next);
+    },
+    [source, frozen, resume, mirror],
+  );
 
   /**
    * remove/replace via the image model. The model sees the clean ORIGINAL frame; its output is
@@ -939,7 +963,7 @@ export default function Stage() {
 
   return (
     <div className="stage-wrap" ref={wrapRef}>
-      <div className="stage" style={{ aspectRatio: `${size.w} / ${size.h}`, "--ar": size.w / size.h } as React.CSSProperties}>
+      <div className={size.h > size.w ? "stage portrait" : "stage"} style={{ aspectRatio: `${size.w} / ${size.h}`, "--ar": size.w / size.h } as React.CSSProperties}>
         {/* Everything in frame coordinates lives here, so one transform keeps it all aligned. */}
         <div className="layer" style={{ transform: mirror ? "scaleX(-1)" : undefined }}>
           <video
@@ -951,6 +975,11 @@ export default function Stage() {
             onLoadedMetadata={(e) =>
               setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })
             }
+            // The relay's canvas stream can change size mid-stream (e.g. portrait 360x640 after the first frame).
+            onResize={(e) => {
+              if (!frozen && e.currentTarget.videoWidth)
+                setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight });
+            }}
           />
           {/* Live recolor output; the hovering mouse is its pointer (same samples as on the frozen frame). */}
           <canvas
@@ -1112,7 +1141,11 @@ export default function Stage() {
           <input type="checkbox" checked={mirror} onChange={(e) => setMirror(e.target.checked)} />
           Mirror view
         </label>
-        {cameras.length > 1 && (
+        <select value={source} onChange={(e) => switchSource(e.target.value as "webcam" | "glasses")}>
+          <option value="webcam">Webcam</option>
+          <option value="glasses">Glasses relay</option>
+        </select>
+        {source === "webcam" && cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
             <option value="">Default camera</option>
             {cameras.map((c, i) => (
