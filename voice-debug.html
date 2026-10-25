@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Voice debug</title>
+    <style>
+      body { margin: 0; padding: 16px; font: 14px/1.4 system-ui, sans-serif; background: #111; color: #eee; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+      button { font: inherit; padding: 14px 22px; border-radius: 8px; border: 1px solid #555; background: #222; color: #eee; touch-action: none; }
+      button.on { background: #b3261e; border-color: #f66; }
+      #partial { min-height: 1.4em; color: #9ad; font-style: italic; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #333; vertical-align: top; }
+      td.path-muse { color: #7d7; }
+      td.path-webspeech { color: #fc6; }
+      .err { color: #f88; }
+      code { color: #aaa; }
+    </style>
+  </head>
+  <body>
+    <h1>Voice debug: Muse Voice Transcribe vs Web Speech</h1>
+    <div class="row">
+      <label>Engine
+        <select id="engine">
+          <option value="muse">Muse (Web Speech fallback)</option>
+          <option value="muse-only">Muse only (no fallback)</option>
+          <option value="webspeech">Web Speech only</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="break" /> break Muse (POST to a missing route) to test fallback</label>
+    </div>
+    <div class="row">
+      <button id="mic">Hold to talk (V)</button>
+      <span id="status"></span>
+    </div>
+    <div id="partial"></div>
+    <table>
+      <thead><tr><th>#</th><th>transcript</th><th>path</th><th>release→text</th><th>Meta round trip</th><th>error</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table>
+    <p><code>Needs the proxy (npm run server) and the Vite dev server. Latency is also logged in the console.</code></p>
+
+    <script type="module">
+      import { MusePushToTalk, museVoiceSupported } from "/src/input/museVoice.ts";
+      import { PushToTalk, speechSupported } from "/src/input/speech.ts";
+
+      const $ = (id) => document.getElementById(id);
+      const mic = $("mic"), status = $("status"), partial = $("partial"), log = $("log");
+      let ptt = null, n = 0;
+      status.textContent = `MediaRecorder/Muse: ${museVoiceSupported() ? "yes" : "no"} · Web Speech: ${speechSupported() ? "yes" : "no"}`;
+
+      const make = () => {
+        const onPartial = (t) => (partial.textContent = `… ${t}`);
+        const engine = $("engine").value;
+        if (engine === "webspeech") return new PushToTalk(onPartial);
+        return new MusePushToTalk(onPartial, {
+          fallback: engine === "muse",
+          endpoint: $("break").checked ? "/api/transcribe-missing" : "/api/transcribe",
+        });
+      };
+      const reset = () => { ptt?.cancel(); ptt = null; };
+      $("engine").onchange = reset;
+      $("break").onchange = reset;
+
+      const down = () => {
+        if (ptt?.listening) return;
+        ptt ??= make();
+        try {
+          ptt.start();
+          mic.classList.add("on");
+          mic.textContent = "● Listening";
+          partial.textContent = "";
+        } catch (e) {
+          status.textContent = e.message;
+        }
+      };
+      const up = async () => {
+        if (!ptt?.listening) return;
+        mic.classList.remove("on");
+        mic.textContent = "Hold to talk (V)";
+        const t0 = performance.now();
+        let row;
+        if (ptt instanceof MusePushToTalk) {
+          row = await ptt.stopDetailed();
+        } else {
+          try {
+            row = { text: await ptt.stop(), path: "webspeech", ms: Math.round(performance.now() - t0) };
+          } catch (e) {
+            row = { text: "", path: "webspeech", ms: Math.round(performance.now() - t0), error: e };
+          }
+        }
+        const tr = document.createElement("tr");
+        const err = row.error ? `${row.error.kind ?? "error"}: ${row.error.message}` : "";
+        tr.innerHTML = `<td>${++n}</td><td></td><td class="path-${row.path}">${row.path}</td><td>${row.ms} ms</td><td>${row.serverMs != null ? row.serverMs + " ms" : ""}</td><td class="err"></td>`;
+        tr.children[1].textContent = row.text ? `"${row.text}"` : "(nothing heard)";
+        tr.children[5].textContent = err;
+        log.prepend(tr);
+      };
+
+      mic.onpointerdown = (e) => { mic.setPointerCapture(e.pointerId); down(); };
+      mic.onpointerup = () => void up();
+      mic.onpointercancel = () => void up();
+      const isV = (e) => e.key.toLowerCase() === "v" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement);
+      window.addEventListener("keydown", (e) => { if (isV(e) && !e.repeat) down(); });
+      window.addEventListener("keyup", (e) => { if (isV(e)) void up(); });
+    </script>
+  </body>
+</html>
