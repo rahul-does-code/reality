@@ -2,24 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Meta Wearables Device Access Toolkit. Empty MetaAppID/ClientToken is fine for Mock Device Kit and
-	     Developer Mode; real release channels need values from the Wearables Developer Center. -->
-	<key>MWDAT</key>
-	<dict>
-		<key>AppLinkURLScheme</key>
-		<string>glassesrelay://</string>
-		<key>MetaAppID</key>
-		<string>$(META_APP_ID)</string>
-		<key>ClientToken</key>
-		<string>$(CLIENT_TOKEN)</string>
-		<key>TeamID</key>
-		<string>$(DEVELOPMENT_TEAM)</string>
-		<key>Analytics</key>
-		<dict>
-			<key>OptOut</key>
-			<true/>
-		</dict>
-	</dict>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -33,21 +15,22 @@
 			</array>
 		</dict>
 	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>bluetooth-central</string>
-	</array>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Needed to connect to Meta AI glasses.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Sends the glasses camera frames to your laptop on this Wi-Fi network.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_bonjour._tcp</string>
-	</array>
-	<key>NSCameraUsageDescription</key>
-	<string>The mock glasses use the phone's back camera as their camera feed.</string>
-	<!-- ws://<laptop-ip>:8788 is plain (unencrypted) WebSocket on the local network. -->
+	<key>MWDAT</key>
+	<dict>
+		<key>Analytics</key>
+		<dict>
+			<key>OptOut</key>
+			<true/>
+		</dict>
+		<key>AppLinkURLScheme</key>
+		<string>glassesrelay://</string>
+		<key>ClientToken</key>
+		<string>$(CLIENT_TOKEN)</string>
+		<key>MetaAppID</key>
+		<string>$(META_APP_ID)</string>
+		<key>TeamID</key>
+		<string>$(DEVELOPMENT_TEAM)</string>
+	</dict>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -55,5 +38,13 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bonjour._tcp</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 </dict>
 </plist>
