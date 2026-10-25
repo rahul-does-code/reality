@@ -4,13 +4,14 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "dev": "vite --host",
+    "dev": "concurrently -n web,api,info -c magenta,cyan,green \"npm:dev:web\" \"npm:server\" \"node scripts/dev-banner.mjs\"",
+    "dev:web": "vite --host",
     "build": "tsc --noEmit && vite build",
     "build:prod": "node scripts/setup.mjs && npm run build",
     "preview": "vite preview --host",
     "start:prod": "NODE_ENV=production node --import tsx deploy/server.ts",
     "server": "tsx watch server/proxy.ts",
-    "dev:all": "concurrently -k -n web,api -c magenta,cyan \"npm:dev\" \"npm:server\"",
+    "dev:all": "npm run dev",
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
     "test:select": "tsx scripts/test-select.mts"
