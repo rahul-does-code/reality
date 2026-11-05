@@ -66,6 +66,11 @@ with the glasses' gyro and re-anchors it from the laptop's object tracker. See
 to freeze and point straight ahead (or at your fingertip in Hand mode), then say the command into the
 glasses mic (the phone app's "Glasses mic" toggle); **Undo** and **Done** are pinches too.
 
+No Ray-Bans? [hardware/glasses](hardware/glasses/README.md) is a pair you 3D-print and wire yourself
+(XIAO ESP32S3 Sense camera + mic, a 128x128 OLED folded into the right eye by a beam splitter, a gyro,
+two buttons), with firmware in [firmware/reality-glasses](firmware/reality-glasses). It connects to the
+same relay: hold SELECT and say the command; the edit shows over the object.
+
 ## Architecture
 
 1. Input: a swappable video source plus a pointer track (hand tracking or mouse) that emits only `PointerSample`s.
