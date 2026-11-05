@@ -50,12 +50,22 @@ for (let i = 0; i <= LUT_N; i++) {
 }
 const toSrgb = (v: number) => TO_SRGB[(v <= 0 ? 0 : v >= 1 ? 1 : v) * LUT_N + 0.5 | 0];
 
+// cbrt on 0..1 by table + linear interpolation (the hot loop's main cost otherwise).
+const CBRT_N = 4096;
+const CBRT = new Float32Array(CBRT_N + 2);
+for (let i = 0; i <= CBRT_N + 1; i++) CBRT[i] = Math.cbrt(Math.min(1, i / CBRT_N));
+function cbrt01(v: number): number {
+  const x = (v <= 0 ? 0 : v >= 1 ? 1 : v) * CBRT_N;
+  const i = x | 0;
+  return CBRT[i] + (CBRT[i + 1] - CBRT[i]) * (x - i);
+}
+
 /** OKLab lightness of an sRGB pixel. */
 function lightness(r: number, g: number, b: number): number {
   const lr = TO_LINEAR[r], lg = TO_LINEAR[g], lb = TO_LINEAR[b];
-  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
-  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
-  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  const l = cbrt01(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+  const m = cbrt01(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+  const s = cbrt01(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
   return 0.2104542553 * l + 0.793617963 * m - 0.0040720468 * s;
 }
 
@@ -130,44 +140,53 @@ export function recolor(frame: ImageData, alpha: Float32Array, color: string, ad
   const out = new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height);
   const d = out.data;
 
-  // Pass 1: alpha-weighted mean lightness of the region.
-  let sum = 0;
-  let wsum = 0;
+  // Pass 1: each masked pixel's lightness (kept for pass 2) and the alpha-weighted mean of the
+  // solid part of the region (the soft edge too if there is no solid part).
+  const L0 = new Float32Array(alpha.length);
+  let sum = 0, wsum = 0, sumAll = 0, wAll = 0;
   for (let i = 0; i < alpha.length; i++) {
     const a = alpha[i];
-    if (a < 0.5) continue;
+    if (a < 0.01) continue;
     const j = i * 4;
-    sum += lightness(d[j], d[j + 1], d[j + 2]) * a;
-    wsum += a;
-  }
-  if (!wsum) {
-    for (let i = 0; i < alpha.length; i++) {
-      if (alpha[i] < 0.01) continue;
-      const j = i * 4;
-      sum += lightness(d[j], d[j + 1], d[j + 2]) * alpha[i];
-      wsum += alpha[i];
+    const l = lightness(d[j], d[j + 1], d[j + 2]);
+    L0[i] = l;
+    sumAll += l * a;
+    wAll += a;
+    if (a >= 0.5) {
+      sum += l * a;
+      wsum += a;
     }
   }
-  const mean = wsum ? sum / wsum : 0.5;
+  const mean = wsum ? sum / wsum : wAll ? sumAll / wAll : 0.5;
   const newMean = mean + (tL - mean) * LIGHTNESS_PULL;
   // Lifting a dark region stretches its (small) shading a little so it doesn't go flat; darkening
   // a bright one compresses it so highlights don't punch through. Kept within 0.7..1.6.
   const contrast = clamp(Math.sqrt((newMean + 0.05) / (mean + 0.05)), 0.7, 1.6);
 
-  // Pass 2: new lightness, target hue/chroma (gamut-clipped), blend by alpha.
+  // Hue and chroma are fixed, so the output color depends only on the new lightness: tabulate it.
+  const OUT_N = 1024;
+  const lut = new Uint8ClampedArray((OUT_N + 1) * 3);
   const rgb = new Float64Array(3);
+  for (let k = 0; k <= OUT_N; k++) {
+    const L = k / OUT_N;
+    const c = maxC ? Math.min(chroma, maxC[(L * L_BINS + 0.5) | 0]) : 0;
+    oklabToLinear(L, ca * c, cb * c, rgb);
+    lut[k * 3] = toSrgb(rgb[0]);
+    lut[k * 3 + 1] = toSrgb(rgb[1]);
+    lut[k * 3 + 2] = toSrgb(rgb[2]);
+  }
+
+  // Pass 2: new lightness per pixel -> color from the table, blended by alpha.
   for (let i = 0; i < alpha.length; i++) {
     const a = alpha[i];
     if (a < 0.01) continue;
     const j = i * 4;
-    const l0 = lightness(d[j], d[j + 1], d[j + 2]);
-    let L = clamp(newMean + (l0 - mean) * contrast, 0.02, 0.99);
-    if (br) L = br > 0 ? L + (1 - L) * br : L * (1 + br);
-    const c = maxC ? Math.min(chroma, maxC[(L * L_BINS + 0.5) | 0]) : 0;
-    oklabToLinear(L, ca * c, cb * c, rgb);
-    d[j] = d[j] + (toSrgb(rgb[0]) - d[j]) * a;
-    d[j + 1] = d[j + 1] + (toSrgb(rgb[1]) - d[j + 1]) * a;
-    d[j + 2] = d[j + 2] + (toSrgb(rgb[2]) - d[j + 2]) * a;
+    let L = clamp(newMean + (L0[i] - mean) * contrast, 0.02, 0.99);
+    if (br) L = clamp(br > 0 ? L + (1 - L) * br : L * (1 + br), 0, 1);
+    const k = ((L * OUT_N + 0.5) | 0) * 3;
+    d[j] = d[j] + (lut[k] - d[j]) * a;
+    d[j + 1] = d[j + 1] + (lut[k + 1] - d[j + 1]) * a;
+    d[j + 2] = d[j + 2] + (lut[k + 2] - d[j + 2]) * a;
   }
   return out;
 }
