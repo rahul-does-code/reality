@@ -29,6 +29,10 @@
 //   downscaled from the PNG here) after {"type":"scene",...,"fmt":"rgb565","w":N,"h":N}. Push-to-talk
 //   audio arrives on its "/" socket as a binary WAV (16 kHz mono); laptop browsers get it on
 //   /glasses/events as {"type":"audio"} followed by the WAV.
+//   Microcontroller WebSocket libraries cap incoming messages (~15 KB for links2004 WebSockets), so
+//   the firmware uses HTTP for the big pieces: /glasses/display?raw=N&fetch=1 sends only the scene
+//   JSON, the frame comes from GET /glasses/scene.rgb565?n=N (header X-Scene-Id), and audio goes to
+//   POST /glasses/audio (body = the WAV).
 //   GET /glasses/app/                 the built web app (npm run build:glasses), so one HTTPS tunnel
 //                                     to this port serves both the page and its socket.
 // Importing this module starts the server (server/proxy.ts imports it).
@@ -63,7 +67,7 @@ let scene: Versioned<{ meta: string; png: Buffer | null }> = { v: 0, value: { me
 let sceneId = 0; // the browser's id of the current scene (anchors for older scenes are dropped)
 let status: Versioned<string> = { v: 0, value: JSON.stringify({ type: "status", text: "" }) };
 let anchor: Versioned<string | null> = { v: 0, value: null };
-type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number; raw: number | null };
+type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number; raw: number | null; fetch: boolean };
 const displayClients = new Map<WebSocket, DisplayClient>();
 const eventClients = new Set<WebSocket>();
 
@@ -147,7 +151,7 @@ function sendToDisplay(ws: WebSocket, c: DisplayClient) {
     if (c.raw) {
       const raw = rawScene(c.raw);
       out.push(JSON.stringify({ ...JSON.parse(scene.value.meta), image: !!raw, fmt: "rgb565", w: c.raw, h: c.raw }));
-      if (raw) out.push(raw);
+      if (raw && !c.fetch) out.push(raw);
     } else {
       out.push(scene.value.meta);
       if (scene.value.png) out.push(scene.value.png);
@@ -308,6 +312,38 @@ const server = http.createServer((req, res) => {
     serveApp(path, res);
     return;
   }
+  if (path === "/glasses/scene.rgb565") {
+    const n = Number(new URL(req.url ?? "/", "http://x").searchParams.get("n"));
+    if (!Number.isInteger(n) || n < 16 || n > 320) {
+      res.writeHead(400, { "Content-Type": "text/plain" }).end("n must be 16..320");
+      return;
+    }
+    const raw = rawScene(n);
+    if (!raw) {
+      res.writeHead(204, { "X-Scene-Id": String(sceneId) }).end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": raw.length, "X-Scene-Id": String(sceneId) }).end(raw);
+    return;
+  }
+  if (path === "/glasses/audio" && req.method === "POST") {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (d: Buffer) => {
+      size += d.length;
+      if (size <= 4 * 1024 * 1024) chunks.push(d);
+    });
+    req.on("end", () => {
+      const wav = Buffer.concat(chunks);
+      if (size > 4 * 1024 * 1024 || !isWav(wav)) {
+        res.writeHead(400, { "Content-Type": "text/plain" }).end("expected a WAV under 4 MB");
+        return;
+      }
+      publishAudio(wav);
+      res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
+    });
+    return;
+  }
   if (path === "/glasses/overlay.png") {
     if (!Buffer.isBuffer(overlay)) {
       res.writeHead(404, { "Content-Type": "text/plain" }).end("no overlay");
@@ -385,9 +421,10 @@ wss.on("connection", (ws, req) => {
     return;
   }
   if (path === "/glasses/display") {
-    const rawN = Number(new URL(req.url ?? "/", "http://x").searchParams.get("raw"));
+    const q = new URL(req.url ?? "/", "http://x").searchParams;
+    const rawN = Number(q.get("raw"));
     const raw = Number.isInteger(rawN) && rawN >= 16 && rawN <= 320 ? rawN : null;
-    const c: DisplayClient = { busy: false, dirty: false, scene: -1, status: -1, anchor: -1, raw };
+    const c: DisplayClient = { busy: false, dirty: false, scene: -1, status: -1, anchor: -1, raw, fetch: q.get("fetch") === "1" };
     displayClients.set(ws, c);
     console.log(`[glasses] display ${raw ? `(DIY glasses, ${raw}x${raw} RGB565)` : "web app"} connected (${displayClients.size})`);
     ws.on("message", (data, isBinary) => {

@@ -87,6 +87,20 @@ try {
   const ai = heard.findIndex((m) => !Buffer.isBuffer(m) && m.type === "audio");
   check("audio event then the WAV", ai >= 0 && Buffer.isBuffer(heard[ai + 1]) && heard[ai + 1].equals(wav), JSON.stringify(heard.map((m) => (Buffer.isBuffer(m) ? `${m.length}B` : m.type))));
 
+  // 2b. The firmware's HTTP paths: the frame by GET, audio by POST, scene JSON only with fetch=1.
+  const fetcher = await open(`/glasses/display?raw=${N}&fetch=1`);
+  const fetched = collect(fetcher);
+  await sleep(300);
+  check("fetch mode sends the scene JSON without the frame", fetched.some((m) => !Buffer.isBuffer(m) && m.type === "scene" && m.image) && !fetched.some(Buffer.isBuffer));
+  const r = await fetch(`http://127.0.0.1:${PORT}/glasses/scene.rgb565?n=${N}`);
+  const body = Buffer.from(await r.arrayBuffer());
+  check("GET scene.rgb565", r.status === 200 && r.headers.get("x-scene-id") === "7" && Buffer.isBuffer(raw) && body.equals(raw), `${r.status} ${body.length}B id ${r.headers.get("x-scene-id")}`);
+  const before = heard.length;
+  const post = await fetch(`http://127.0.0.1:${PORT}/glasses/audio`, { method: "POST", body: wav, headers: { "content-type": "audio/wav" } });
+  await sleep(300);
+  check("POST audio reaches the laptop", post.ok && heard.slice(before).some((m) => Buffer.isBuffer(m) && m.equals(wav)));
+  fetcher.close();
+
   // 3. Buttons and clock pings on the display socket.
   glasses.send(JSON.stringify({ type: "input", action: "undo" }));
   glasses.send(JSON.stringify({ type: "ping", t: 123 }));
