@@ -6,10 +6,10 @@ import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
 import { samEncode, samSegment, samStatus, warmSam, type SamPoint } from "../vision/sam";
 import type { SegResult } from "../vision/segmenter";
-import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
+import { resolveSelection, segmentClick, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
 import { AI_MASK_WAIT_MS, aiSegmentAt, getAiMask, onAiMask, setAiMask, type AiMaskResult } from "../vision/aiMask";
-import { bbox, coverage, edgeAlpha, type Point } from "../vision/mask";
+import { bbox, coverage, feather, type Point } from "../vision/mask";
 import { combine, isClosed, selectStroke, type CombineMode } from "../vision/lasso";
 import { handHullInFrame, removeHand } from "../vision/handMask";
 import { StrokeRecognizer, type Gesture } from "../input/strokes";
@@ -23,6 +23,8 @@ import { Timeline } from "../commands/timeline";
 import { LiveRecolor } from "../edit/liveRecolor";
 
 const CROSSFADE_MS = 400;
+/** Note on a progressive-click upgrade from the in-browser SAM (vs the server AI mask). */
+const SAM_LOCAL = "efficientsam in browser";
 import { speechSupported } from "../input/speech";
 import { createPushToTalk, MusePushToTalk, voiceSupported, type PushToTalkLike, type VoiceEngine } from "../input/museVoice";
 import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
@@ -341,7 +343,7 @@ export default function Stage() {
         const seg = refined
           ? { kind: "pointed" as const, ...refined }
           : g.kind === "click"
-            ? { kind: "pointed" as const, ...(await segmentPointed(original, g.p)) }
+            ? { kind: "pointed" as const, ...(mode === "replace" ? await segmentClick(original, g.p, false, true) : await segmentPointed(original, g.p)) }
             : await selectStroke(original, g.points);
         if (id !== reqId.current) return; // a newer gesture or a resume superseded this one
         let mask = refined ? refined.mask : combine(prev, seg.mask, mode);
@@ -376,17 +378,27 @@ export default function Stage() {
           pointRef.current = g.p;
           setPoint(g.p);
         }
-        const sel = { mask, subject: mask, alpha: edgeAlpha(mask, original), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
+        const sel = { mask, subject: mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
         const how = g.kind === "click" ? (g.source === "finger" ? "pinch" : "click") : seg.kind;
         applySelection(sel, original, how);
         // Clicks and pinches only (lasso/scribble already are what the user drew): the AI mask
         // runs in the background; commands don't wait for it unless they arrive before it's done.
-        if (g.kind !== "click" || getAiMask() !== "always") return;
+        if (g.kind !== "click") return;
+        // A better mask may still be coming: the server AI mask (if on), else (or if that falls
+        // back) the in-browser SAM mask once its embedding is ready. Swapped in by `swap` below.
+        const samUp: Promise<AiMaskResult | null> =
+          "upgrade" in seg && seg.upgrade
+            ? seg.upgrade.then((r) => r && { mask: r.mask, source: "sam" as const, name: null, ms: Math.round(r.ms), note: SAM_LOCAL })
+            : Promise.resolve(null);
+        const fellBack = (r: AiMaskResult) => r.source === "mediapipe" || r.source === "fallback";
+        const kept: AiMaskResult = { mask: seg.mask, source: "mediapipe", name: null, ms: 0, note: "no better mask" };
+        const aiJob = getAiMask() === "always" ? aiSegmentAt(original, g.p) : null;
+        if (!aiJob && !("upgrade" in seg && seg.upgrade)) return;
         const token = {
           id,
           frame: original,
           p: g.p,
-          job: aiSegmentAt(original, g.p),
+          job: aiJob ? aiJob.then(async (r) => (fellBack(r) ? ((await samUp) ?? r) : r)) : samUp.then((r) => r ?? kept),
           swap: (r: AiMaskResult) => {
             if (aiPendingRef.current !== token) return;
             aiPendingRef.current = null;
@@ -404,8 +416,9 @@ export default function Stage() {
             const name = `${r.name ?? "pointed"} (${r.source})`;
             const aiLabel = mode === "replace" ? name : `${prevLabel} ${mode === "add" ? "+" : "−"} ${name}`;
             const aiNotes = [...notes, `ai ${r.source} ${detail}`].join(" · ");
-            samPtsRef.current = null; // the AI mask replaces what the SAM points described
-            applySelection({ mask: m, subject: m, alpha: edgeAlpha(m, original), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
+            // The local SAM mask can be refined with more points; a server AI mask can't.
+            samPtsRef.current = r.note === SAM_LOCAL && mode === "replace" ? { frame: original, pts: [{ ...g.p, label: 1 }] } : null;
+            applySelection({ mask: m, subject: m, alpha: feather(m, w, h, 3), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
           },
         };
         aiPendingRef.current = token;
@@ -423,6 +436,8 @@ export default function Stage() {
   useEffect(() => {
     const off = onAiMask((frame, p, r) => {
       const t = aiPendingRef.current;
+      // A fallback result is not news: the token's own job may still bring the in-browser SAM mask.
+      if (r.source === "mediapipe" || r.source === "fallback") return;
       if (t && t.frame === frame && t.p.x === p.x && t.p.y === p.y) t.swap(r);
     });
     return () => void off();
@@ -1330,7 +1345,7 @@ export default function Stage() {
         {error && <div className="error">{error}</div>}
         <div className={`badge ${frozen ? (comparing ? "is-original" : "is-frozen") : "is-live"}`}>
           {frozen ? (comparing ? "ORIGINAL" : "FROZEN") : "LIVE"}
-          {aiPending ? " · AI mask..." : ""}
+          {aiPending ? " · refining mask..." : ""}
         </div>
         {toast && <div className="error">{toast}</div>}
         {!frozen && !error && (

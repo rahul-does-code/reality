@@ -8,6 +8,7 @@ import { HandLandmarker, type NormalizedLandmark } from "@mediapipe/tasks-vision
 import { loadLocalModel, visionFileset } from "../vision/assets";
 import type { Point } from "../vision/mask";
 import { pointer, type PointerSample } from "./pointer";
+import { Euro2, OneEuro } from "./oneEuro";
 
 const LOCAL_MODEL = "/models/hand_landmarker.task";
 const REMOTE_MODEL =
@@ -28,8 +29,15 @@ const MIN_TRACKING_CONFIDENCE = 0.6;
  * on slow moves; higher BETA = less lag on fast moves. Tune MIN_CUTOFF first holding still, then
  * BETA while moving quickly.
  */
-export const MIN_CUTOFF = 5.0;
-export const BETA = 0.2;
+// Tuned with scripts/eval-hand.mts (real HandLandmarker noise replayed on pointing motions): the
+// old 5.0 / 0.2 barely filtered (jitter at rest 5.8px ~ the raw 5.4px). 3.0 / 0.02 with the aim
+// direction on its own filter: ~3.2px at rest and ~1.9px error when you pinch after a fast reach
+// (was 3.2px), for ~8px trailing during the reach (was ~4px).
+export const MIN_CUTOFF = 3.0;
+export const BETA = 0.02;
+/** The aim direction (tip - DIP) changes slowly, so it gets a much steadier filter than the tip. */
+const DIR_MIN_CUTOFF = 0.6;
+const DIR_BETA = 0.001;
 /** One Euro filter on the pinch ratio (unitless, ~0.1 closed to ~1+ open). */
 const PINCH_MIN_CUTOFF = 3.0;
 const PINCH_BETA = 0.5;
@@ -124,7 +132,7 @@ export class HandTracker {
   private logTimer = 0;
 
   private tipF = new Euro2(MIN_CUTOFF, BETA);
-  private dipF = new Euro2(MIN_CUTOFF, BETA);
+  private dirF = new Euro2(DIR_MIN_CUTOFF, DIR_BETA);
   private midF = new Euro2(MIN_CUTOFF, BETA);
   private pinchF = new OneEuro(PINCH_MIN_CUTOFF, PINCH_BETA);
   private ema: Point | null = null;
@@ -210,7 +218,7 @@ export class HandTracker {
 
   private resetFilters() {
     this.tipF.reset();
-    this.dipF.reset();
+    this.dirF.reset();
     this.midF.reset();
     this.pinchF.reset();
     this.ema = null;
@@ -264,12 +272,13 @@ export class HandTracker {
     this.confidence = score ?? 1;
 
     // Position filters follow the live-tunable values (the pinch filter keeps its own).
-    for (const f of [this.tipF, this.dipF, this.midF]) f.tune(handTuning.minCutoff, handTuning.beta);
+    for (const f of [this.tipF, this.midF]) f.tune(handTuning.minCutoff, handTuning.beta);
     const px = (i: number): Point => ({ x: hand[i].x * w, y: hand[i].y * h });
     const rawTip = px(INDEX_TIP);
     const thumb = px(THUMB_TIP);
     const tip = this.tipF.filter(rawTip, ts);
-    const dip = this.dipF.filter(px(INDEX_DIP), ts);
+    const dipRaw = px(INDEX_DIP);
+    const dir = this.dirF.filter({ x: rawTip.x - dipRaw.x, y: rawTip.y - dipRaw.y }, ts);
     const mid = this.midF.filter({ x: (thumb.x + rawTip.x) / 2, y: (thumb.y + rawTip.y) / 2 }, ts);
     const handSize = Math.max(1, dist(px(WRIST), px(MIDDLE_MCP)));
     const ratio = this.pinchF.filter(dist(thumb, rawTip) / handSize, ts);
@@ -282,7 +291,7 @@ export class HandTracker {
     this.history.push({ t: now, raw: rawTip, ema: this.ema, filtered: tip });
 
     const aimAhead = handTuning.aimAhead;
-    const aim = { x: tip.x + (tip.x - dip.x) * aimAhead, y: tip.y + (tip.y - dip.y) * aimAhead };
+    const aim = { x: tip.x + dir.x * aimAhead, y: tip.y + dir.y * aimAhead };
 
     // Hysteresis + debounce: only flip after PINCH_FRAMES frames past the far threshold.
     const want = this.pressed ? ratio <= PINCH_RELEASE : ratio < PINCH_PRESS;
@@ -311,70 +320,6 @@ export class HandTracker {
     pointer.emit(this.last);
   }
 }
-
-/** One Euro filter (Casiez et al. 2012): an adaptive low-pass whose cutoff rises with speed. */
-class OneEuro {
-  private prev: number | null = null;
-  private dPrev = 0;
-  private tPrev = 0;
-
-  constructor(
-    private minCutoff: number,
-    private beta: number,
-    private dCutoff = 1.0,
-  ) {}
-
-  reset() {
-    this.prev = null;
-  }
-
-  tune(minCutoff: number, beta: number) {
-    this.minCutoff = minCutoff;
-    this.beta = beta;
-  }
-
-  /** `tMs` must increase between calls. */
-  filter(x: number, tMs: number): number {
-    if (this.prev === null) {
-      this.prev = x;
-      this.dPrev = 0;
-      this.tPrev = tMs;
-      return x;
-    }
-    const dt = Math.max(1e-3, (tMs - this.tPrev) / 1000);
-    this.tPrev = tMs;
-    const d = (x - this.prev) / dt;
-    this.dPrev += (d - this.dPrev) * smoothing(this.dCutoff, dt);
-    const cutoff = this.minCutoff + this.beta * Math.abs(this.dPrev);
-    this.prev += (x - this.prev) * smoothing(cutoff, dt);
-    return this.prev;
-  }
-}
-
-class Euro2 {
-  private fx: OneEuro;
-  private fy: OneEuro;
-  constructor(minCutoff: number, beta: number) {
-    this.fx = new OneEuro(minCutoff, beta);
-    this.fy = new OneEuro(minCutoff, beta);
-  }
-  reset() {
-    this.fx.reset();
-    this.fy.reset();
-  }
-  tune(minCutoff: number, beta: number) {
-    this.fx.tune(minCutoff, beta);
-    this.fy.tune(minCutoff, beta);
-  }
-  filter(p: Point, tMs: number): Point {
-    return { x: this.fx.filter(p.x, tMs), y: this.fy.filter(p.y, tMs) };
-  }
-}
-
-const smoothing = (cutoff: number, dt: number) => {
-  const tau = 1 / (2 * Math.PI * cutoff);
-  return 1 / (1 + tau / dt);
-};
 
 /** Radial std dev: sqrt(var x + var y). */
 function stdDev(pts: Point[]): number {

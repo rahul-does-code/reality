@@ -21,6 +21,7 @@ let nextId = 1;
 const keys = new WeakMap<ImageData, number>();
 const encoded = new Map<number, Promise<number>>(); // key -> encode ms (only the latest frame is kept)
 const pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+const ready = new Set<number>(); // keys whose embedding is computed
 const encodeWaiters = new Map<number, { resolve: (ms: number) => void; reject: (e: Error) => void }>();
 
 function getWorker(): Worker | null {
@@ -37,6 +38,7 @@ function getWorker(): Worker | null {
     if (m.type === "warm") ep = m.ep;
     else if (m.type === "encoded") {
       ep = m.ep;
+      ready.add(m.key);
       encodeWaiters.get(m.key)?.resolve(m.ms);
       encodeWaiters.delete(m.key);
     } else if (m.type === "decoded") {
@@ -83,6 +85,7 @@ export function samEncode(frame: ImageData): Promise<number> {
   key = nextKey++;
   keys.set(frame, key);
   encoded.clear(); // the worker keeps one embedding
+  ready.clear();
   const k = key;
   const job = new Promise<number>((resolve, reject) => encodeWaiters.set(k, { resolve, reject }));
   encoded.set(k, job);
@@ -95,6 +98,12 @@ export function samEncode(frame: ImageData): Promise<number> {
 export const samHasFrame = (frame: ImageData) => {
   const k = keys.get(frame);
   return !!k && encoded.has(k);
+};
+
+/** True once `frame`'s embedding is computed, so a decode takes only tens of ms. */
+export const samReady = (frame: ImageData) => {
+  const k = keys.get(frame);
+  return !!k && ready.has(k);
 };
 
 /** Segment with SAM on `frame` (encodes first if needed). */

@@ -18,6 +18,8 @@ export type SegResult = {
   inside: boolean;
   /** Which model made a "model" mask (absent = MediaPipe). */
   engine?: "sam" | "mediapipe";
+  /** Progressive clicks: the SAM mask, once its embedding is ready (null if it fails or is implausible). */
+  upgrade?: Promise<SegResult | null>;
 };
 
 /** A pointed object covering more of the frame than this is a wrong mask (e.g. the background). */

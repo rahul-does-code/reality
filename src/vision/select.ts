@@ -1,11 +1,11 @@
 // SELECTION: a voice `select` + frame + point -> mask. Knows nothing about operations.
 import type { NamedInstance, Select, SelectSource, SegmentNamedResponse } from "../commands/schema";
 import { MAX_POINT_COVERAGE, MIN_POINT_COVERAGE, segmentAt, type SegResult } from "./segmenter";
-import { samSegment } from "./sam";
+import { samReady, samSegment } from "./sam";
 
 /** How long a click waits for EfficientSAM (its image embedding starts on freeze) before MediaPipe. */
 export const SAM_WAIT_MS = 4000;
-import { applyRegion, bbox, boxIoU, coverage, dilate, edgeAlpha, erode, invert, refineRadius, type Point } from "./mask";
+import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
 import { aiSegmentWithin, getAiMask } from "./aiMask";
@@ -33,32 +33,45 @@ export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: s
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
 let last: { frame: ImageData; x: number; y: number; allowLarge: boolean; job: Promise<SegResult> } | null = null;
 
-/**
- * Best mask for a click: EfficientSAM (sam.ts) when its embedding for this frame is ready within
- * SAM_WAIT_MS, else MediaPipe's segmentAt. SAM's candidates come best-first (the trained chooser's
- * order); the first with a plausible size that contains the point wins.
- */
-export async function segmentClick(frame: ImageData, p: Point, allowLarge = false): Promise<SegResult> {
+/** SAM's best plausible candidate for a click (first in the chooser's order), or null. */
+async function samClick(frame: ImageData, p: Point, allowLarge: boolean): Promise<SegResult | null> {
   const t0 = performance.now();
+  const r = await samSegment(frame, [{ ...p, label: 1 }]);
   const { width: w, height: h } = frame;
+  const maxCov = allowLarge ? 0.8 : MAX_POINT_COVERAGE;
+  const i = Math.min(h - 1, Math.max(0, Math.round(p.y))) * w + Math.min(w - 1, Math.max(0, Math.round(p.x)));
+  for (const m of r.masks) {
+    const cov = coverage(m);
+    if (cov < MIN_POINT_COVERAGE || cov > maxCov || !m[i]) continue;
+    const note = `sam ${r.ep}${r.encodeMs ? `, encode ${r.encodeMs}ms` : ""}`;
+    return { mask: m, source: "model", engine: "sam", ms: performance.now() - t0, coverage: cov, inside: true, note };
+  }
+  return null;
+}
+
+/**
+ * Best mask for a click: EfficientSAM (sam.ts) on the frame's embedding (started on freeze), else
+ * MediaPipe's segmentAt. SAM's candidates come best-first (the trained chooser's order); the first
+ * with a plausible size that contains the point wins.
+ * progressive: if the embedding isn't ready yet, return MediaPipe's mask at once with `upgrade`
+ * resolving to SAM's when it is (the click feels instant on slow machines). Otherwise wait up to
+ * SAM_WAIT_MS for SAM.
+ */
+export async function segmentClick(frame: ImageData, p: Point, allowLarge = false, progressive = false): Promise<SegResult> {
+  const t0 = performance.now();
+  if (progressive && !samReady(frame)) {
+    const upgrade = samClick(frame, p, allowLarge).catch((e) => {
+      console.warn("[sam] click failed, keeping MediaPipe:", e);
+      return null;
+    });
+    const mp = await segmentAt(frame, p, allowLarge);
+    return { ...mp, engine: mp.source === "model" ? "mediapipe" : undefined, upgrade };
+  }
   let why = "";
   try {
-    const r = await Promise.race([
-      samSegment(frame, [{ ...p, label: 1 }]),
-      new Promise<null>((res) => setTimeout(() => res(null), SAM_WAIT_MS)),
-    ]);
-    if (!r) why = "sam not ready";
-    else {
-      const maxCov = allowLarge ? 0.8 : MAX_POINT_COVERAGE;
-      const i = Math.min(h - 1, Math.max(0, Math.round(p.y))) * w + Math.min(w - 1, Math.max(0, Math.round(p.x)));
-      for (const m of r.masks) {
-        const cov = coverage(m);
-        if (cov < MIN_POINT_COVERAGE || cov > maxCov || !m[i]) continue;
-        const note = `sam ${r.ep}${r.encodeMs ? `, encode ${r.encodeMs}ms` : ""}`;
-        return { mask: m, source: "model", engine: "sam", ms: performance.now() - t0, coverage: cov, inside: true, note };
-      }
-      why = "sam masks implausible";
-    }
+    const r = await Promise.race([samClick(frame, p, allowLarge), new Promise<"timeout">((res) => setTimeout(() => res("timeout"), SAM_WAIT_MS))]);
+    if (r && r !== "timeout") return r;
+    why = r === "timeout" ? "sam not ready" : "sam masks implausible";
   } catch (e) {
     why = e instanceof Error ? e.message : String(e);
   }
@@ -319,9 +332,5 @@ export async function resolveSelection(
     notes.push("inverted");
   }
   if (coverage(mask) === 0) return { error: "selection is empty" };
-  // Edge-aware alpha on the subject; the background's is its exact complement, so the subject's
-  // pixels stay identical and the seam between them is shared.
-  const subjectAlpha = edgeAlpha(base, frame);
-  const alpha = inverted ? subjectAlpha.map((v) => 1 - v) : subjectAlpha;
-  return { mask, subject: base, alpha, note: notes.join(" · "), label, source, usedPoint };
+  return { mask, subject: base, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source, usedPoint };
 }

@@ -15,7 +15,6 @@
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
     "test:select": "tsx scripts/test-select.mts",
-    "test:mask": "tsx scripts/test-mask.mts",
     "test:chooser": "tsx scripts/test-chooser.mts",
     "eval:select": "node scripts/eval-select.mjs"
   },

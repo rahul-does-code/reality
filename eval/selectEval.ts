@@ -6,7 +6,7 @@ import { segmentAt } from "../src/vision/segmenter";
 import { segmentClick } from "../src/vision/select";
 import { samEncode, samSegment, type SamPoint } from "../src/vision/sam";
 import { combine } from "../src/vision/lasso";
-import { edgeAlpha, feather, type Point } from "../src/vision/mask";
+import { feather, type Point } from "../src/vision/mask";
 
 type Item = { id: string; cls: string; w: number; h: number; cov: number; center: [number, number]; rand: [number, number] };
 type Mask = Uint8Array | Float32Array;
@@ -102,6 +102,15 @@ const mp = (f: ImageData, p: Point) => {
   if (!mpCache || mpCache.frame !== f || mpCache.x !== p.x || mpCache.y !== p.y) mpCache = { frame: f, x: p.x, y: p.y, job: segmentAt(f, p) };
   return mpCache.job;
 };
+// One SAM+chooser decode per (frame, click), shared by the edge variants.
+let samCache: { frame: ImageData; x: number; y: number; job: Promise<{ mask: Uint8Array; ms: number }> } | null = null;
+const samC = (f: ImageData, p: Point) => {
+  if (!samCache || samCache.frame !== f || samCache.x !== p.x || samCache.y !== p.y) {
+    const t = performance.now();
+    samCache = { frame: f, x: p.x, y: p.y, job: samSegment(f, [{ ...p, label: 1 }]).then((r) => ({ mask: r.masks[0], ms: performance.now() - t })) };
+  }
+  return samCache.job;
+};
 const timed = async (f: () => Promise<Mask>): Promise<Out> => {
   const t = performance.now();
   const mask = await f();
@@ -117,15 +126,15 @@ const single: Record<string, (f: ImageData, p: Point) => Promise<Out>> = {
     const r = await mp(f, p);
     return { mask: feather(r.mask, f.width, f.height, 3), ms: r.ms };
   },
-  "mediapipe + edgeAlpha": async (f, p) => {
-    const r = await mp(f, p);
-    return { mask: edgeAlpha(r.mask, f), ms: r.ms };
-  },
   "sam, SAM's own pick": (f, p) => timed(async () => (await samSegment(f, [{ ...p, label: 1 }], { chooser: false })).masks[0]),
-  "sam + trained chooser": (f, p) => timed(async () => (await samSegment(f, [{ ...p, label: 1 }])).masks[0]),
-  "app click (segmentClick) + edgeAlpha": async (f, p) => {
+  "sam + trained chooser": async (f, p) => samC(f, p),
+  "sam + chooser + feather r3": async (f, p) => {
+    const r = await samC(f, p);
+    return { mask: feather(r.mask, f.width, f.height, 3), ms: r.ms };
+  },
+  "app click (segmentClick) + feather": async (f, p) => {
     const r = await segmentClick(f, p);
-    return { mask: edgeAlpha(r.mask, f), ms: r.ms, note: r.source === "fallback" ? "fallback" : r.engine };
+    return { mask: feather(r.mask, f.width, f.height, 3), ms: r.ms, note: r.source === "fallback" ? "fallback" : r.engine };
   },
 };
 

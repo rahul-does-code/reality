@@ -12,7 +12,7 @@ Requires Node 20+ and Chrome or Edge (Web Speech, MediaPipe on WebGL).
 
 ```sh
 npm install
-node scripts/setup.mjs   # copies the MediaPipe WASM into public/ and downloads the models
+node scripts/setup.mjs   # copies the MediaPipe/ONNX Runtime WASM into public/ and downloads the models (incl. EfficientSAM)
 ```
 
 Create `.env` in the project root (never committed). Variable names:
@@ -37,6 +37,9 @@ the command, or tap a suggestion chip. U undoes, Esc deselects, hold B to compar
 S saves, F toggles fullscreen. Under "Settings & debug": video/voice source, "Hand mode" (point with
 your index finger, pinch to press), "Live recolor" (recolors what you point at on the moving video),
 AI mask and the segmentation readout.
+
+Quality is measured, not eyeballed: `npm run eval:select` (selection IoU on labeled photos) and
+`npx tsx scripts/eval-hand.mts` (hand detection and pointer jitter/lag). See NOTES.md.
 
 Debug pages: `/strokes-debug.html`, `/live-debug.html`, `/voice-debug.html`, `/face-debug.html`,
 `/glasses-debug.html`.
@@ -63,6 +66,6 @@ Run it (full steps in [ios/README.md](ios/README.md)):
 1. Input: a swappable video source plus a pointer track (hand tracking or mouse) that emits only `PointerSample`s.
 2. Gestures: a recognizer turns samples into clicks and strokes (closed = lasso, open = scribble).
 3. Voice: Web Speech or Muse Voice transcribes; Gemini (Muse Spark fallback) parses it into a command JSON with an optional `select` and an `op`.
-4. Selection: point segmentation (MediaPipe), lasso/scribble, face parts (FaceLandmarker), named objects (Gemini boxes) and region/refine/add/subtract modifiers produce one mask, always on the original frozen frame.
+4. Selection: point segmentation (EfficientSAM-Ti in a Web Worker, its frame embedding computed on freeze, a trained chooser picking the whole object among its 3 candidates, Shift/Alt-click adding positive/negative points; MediaPipe as fallback), lasso/scribble, face parts (FaceLandmarker), named objects (Gemini boxes) and region/refine/add/subtract modifiers produce one mask, always on the original frozen frame.
 5. Operation: recolor and blur run locally; remove/replace call Muse Image through `server/proxy.ts`, which holds every API key.
 6. Composite: edits blend only inside the feathered mask, so pixels outside it stay identical; history gives undo.
