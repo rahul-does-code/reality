@@ -20,7 +20,7 @@ type Active = {
   raf: number;
 };
 
-type FrameTimes = { tPhone: number | null; tRelay: number | null }; // Date.now() ms, from the relay
+export type FrameTimes = { tPhone: number | null; tRelay: number | null }; // Date.now() ms, from the relay
 
 let startToken = 0; // guards against overlapping starts (React StrictMode runs effects twice in dev)
 let active: Active | null = null;
@@ -28,10 +28,19 @@ let frames = 0;
 let lastFrameAt = 0;
 let latencyMs: number | null = null; // phone capture -> drawn (needs phone and laptop clocks in sync)
 let relayLatencyMs: number | null = null; // relay arrival -> drawn (same machine, so always valid)
+let drawnTimes: FrameTimes = { tPhone: null, tRelay: null }; // the frame now on the canvas
 
 export function defaultGlassesUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.hostname}:${GLASSES_RELAY_PORT}/glasses/ws`;
+}
+
+/**
+ * Phone send time and relay arrival time (Date.now() ms) of the frame now on the canvas, i.e. the one
+ * a freeze captures. The glasses display uses them to know where the head was when it was taken.
+ */
+export function glassesFrameTimes(): FrameTimes {
+  return drawnTimes;
 }
 
 /** Frames drawn since the page loaded, the time of the last one, and its latencies (for fps/stall readouts). */
@@ -95,6 +104,7 @@ export async function startGlassesSource(
     frames++;
     lastFrameAt = performance.now();
     const now = Date.now();
+    drawnTimes = t;
     latencyMs = t.tPhone != null ? now - t.tPhone : null;
     relayLatencyMs = t.tRelay != null ? now - t.tRelay : null;
     resolveFirst();

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
-import { startGlassesSource, stopGlassesSource } from "../input/glassesSource";
+import { glassesFrameTimes, startGlassesSource, stopGlassesSource } from "../input/glassesSource";
+import { ObjectTracker, overlayBox } from "../vision/track";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
@@ -139,6 +140,10 @@ export default function Stage() {
   const [glassesTest, setGlassesTest] = useState(false);
   const [editTick, setEditTick] = useState(0);
   const overlaySinkRef = useRef<GlassesOverlaySink | null>(null);
+  // Relay-clock time the frozen glasses frame was captured (the glasses web app looks up the head pose
+  // then), and the tracker's last result for the readout.
+  const freezeTimeRef = useRef<number | null>(null);
+  const [trackInfo, setTrackInfo] = useState("");
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
   const pttRef = useRef<PushToTalkLike | null>(null);
@@ -249,11 +254,12 @@ export default function Stage() {
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(video, 0, 0);
     historyRef.current.reset(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    freezeTimeRef.current = source === "glasses" ? glassesFrameTimes().tRelay : null;
     setDepth(0);
     clearSelection();
     appliedRef.current = null;
     setFrozen(true);
-  }, [clearSelection]);
+  }, [clearSelection, source]);
 
   const resume = useCallback(() => {
     recognizer.current.reset();
@@ -1176,8 +1182,42 @@ export default function Stage() {
       status: voiceStatus === "hold V to talk" ? "" : voiceStatus, // the idle hint is for the laptop
       view: glassesView,
       test: glassesTest,
+      tCapture: frozen ? freezeTimeRef.current : null,
     });
   }, [overlayOn, frozen, editTick, alpha, voiceStatus, glassesView, glassesTest]);
+
+  // While frozen, find the edited object in the live glasses video a few times a second and send where
+  // it is, so the glasses web app can keep the overlay on it when the wearer moves.
+  useEffect(() => {
+    const h = historyRef.current;
+    const original = h.original;
+    const current = h.current;
+    if (!overlayOn || !frozen || glassesTest || !original || !current) {
+      setTrackInfo("");
+      return;
+    }
+    const box = overlayBox(original, current, alpha);
+    const tracker = box && ObjectTracker.create(original, box);
+    if (!tracker) {
+      setTrackInfo(box ? "not tracked (too big or flat)" : "");
+      return;
+    }
+    let lastT: number | null = freezeTimeRef.current;
+    const id = window.setInterval(() => {
+      const video = videoRef.current;
+      const t = glassesFrameTimes().tRelay;
+      if (!video || t == null || t === lastT || video.videoWidth !== original.width || video.videoHeight !== original.height) return;
+      lastT = t;
+      const fix = tracker.locate(video, original.width, original.height);
+      if (!fix) {
+        setTrackInfo("tracking: lost");
+        return;
+      }
+      overlaySinkRef.current?.anchor(fix.dx, fix.dy, t, glassesView, original.width, original.height);
+      setTrackInfo(`tracking ${fix.score.toFixed(2)} (${Math.round(fix.dx)}, ${Math.round(fix.dy)})`);
+    }, 200);
+    return () => clearInterval(id);
+  }, [overlayOn, frozen, editTick, alpha, glassesView, glassesTest]);
   const glassesWin = glassesView.mode === "aligned" ? displayWindow(glassesView, size.w, size.h) : null;
 
   // Cycling hint: what to point at and say.
@@ -1464,6 +1504,7 @@ export default function Stage() {
             Test pattern
           </label>
         )}
+        {overlayOn && trackInfo && <span className="readout">{trackInfo}</span>}
         {source === "webcam" && cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
             <option value="">Default camera</option>

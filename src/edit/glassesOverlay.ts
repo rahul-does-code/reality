@@ -2,6 +2,9 @@
 // additive), so only the edit is drawn: pixels that differ from the original frozen frame, a white
 // outline around the current selection, and a status strip. The relay (server/routes/glassesRelay.ts,
 // /glasses/overlay) passes it to the iPhone app, which puts it on the display with DAT's Image view.
+// The same socket also feeds the glasses web app (glasses-webapp/), which draws the overlay on the
+// glasses itself and moves it with the head: a "scene" (the overlay without the status strip, plus the
+// time its frame was captured), the status as text, and "anchors" (where the tracker found the object).
 //
 // Which part of the camera frame the display covers:
 //   "whole":   the whole frame letterboxed into the square (for the phone's mock display preview)
@@ -59,7 +62,13 @@ export type OverlayInput = {
   status: string;
   view: GlassesView;
   test?: boolean; // calibration pattern instead of the edit
+  tCapture?: number | null; // relay-clock ms when the frozen frame was captured
 };
+
+/** Messages to the relay for the glasses web app (text JSON; a scene with an image is followed by its PNG). */
+export type SceneMessage = { type: "scene"; id: number; t: number | null; image: boolean };
+export type AnchorMessage = { type: "anchor"; id: number; dx: number; dy: number; t: number };
+export type StatusMessage = { type: "status"; text: string };
 
 function toCanvas(img: ImageData): HTMLCanvasElement {
   const c = document.createElement("canvas");
@@ -165,6 +174,9 @@ export class GlassesOverlaySink {
   private lastSent = 0;
   private sending = false;
   private reconnectTimer = 0;
+  private sceneKey: unknown[] = [];
+  private sceneId = 0;
+  private lastStatus: string | null = null;
   sent = 0;
 
   constructor(private url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.hostname}:${GLASSES_RELAY_PORT}/glasses/overlay`) {
@@ -174,7 +186,12 @@ export class GlassesOverlaySink {
   private connect() {
     if (this.closed) return;
     const ws = new WebSocket(this.url);
-    ws.onopen = () => this.schedule();
+    ws.onopen = () => {
+      // A fresh relay connection gets everything again.
+      this.sceneKey = [];
+      this.lastStatus = null;
+      this.schedule();
+    };
     ws.onclose = () => {
       if (!this.closed) this.reconnectTimer = window.setTimeout(() => this.connect(), 1000);
     };
@@ -184,6 +201,19 @@ export class GlassesOverlaySink {
   update(input: OverlayInput) {
     this.pending = input;
     this.schedule();
+  }
+
+  /** Current scene id (anchors refer to it). */
+  get scene() {
+    return this.sceneId;
+  }
+
+  /** Where the tracker found the object: frame-px offset from the frozen position, at relay time t. */
+  anchor(dxFrame: number, dyFrame: number, t: number, view: GlassesView, w: number, h: number) {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    const k = DISPLAY_PX / displayWindow(view, w, h).side;
+    const msg: AnchorMessage = { type: "anchor", id: this.sceneId, dx: dxFrame * k, dy: dyFrame * k, t };
+    this.ws.send(JSON.stringify(msg));
   }
 
   clear() {
@@ -207,10 +237,30 @@ export class GlassesOverlaySink {
     this.pending = null;
     this.sending = true;
     try {
-      const blob = await new Promise<Blob | null>((r) => renderOverlay(input).toBlob(r, "image/png"));
-      if (blob && !this.closed && ws.readyState === WebSocket.OPEN) {
-        ws.send(await blob.arrayBuffer());
+      const png = async (c: HTMLCanvasElement) =>
+        (await new Promise<Blob | null>((r) => c.toBlob(r, "image/png")))?.arrayBuffer() ?? null;
+      // For the phone (DAT Display): one image with the status burned in.
+      const phonePng = await png(renderOverlay(input));
+      if (phonePng && !this.closed && ws.readyState === WebSocket.OPEN) {
+        ws.send(phonePng);
         this.sent++;
+      }
+      // For the glasses web app: the scene only when it changed (it re-anchors there), status as text.
+      const key = [input.original, input.current, input.alpha, JSON.stringify(input.view), !!input.test, input.tCapture];
+      if (key.some((v, i) => v !== this.sceneKey[i])) {
+        this.sceneKey = key;
+        const image = !!input.test || !!input.original;
+        const scenePng = image ? await png(renderOverlay({ ...input, status: "" })) : null;
+        if (!this.closed && ws.readyState === WebSocket.OPEN) {
+          const msg: SceneMessage = { type: "scene", id: ++this.sceneId, t: input.test ? null : input.tCapture ?? null, image: !!scenePng };
+          ws.send(JSON.stringify(msg));
+          if (scenePng) ws.send(scenePng);
+        }
+      }
+      if (input.status !== this.lastStatus && ws.readyState === WebSocket.OPEN) {
+        this.lastStatus = input.status;
+        const msg: StatusMessage = { type: "status", text: input.status };
+        ws.send(JSON.stringify(msg));
       }
     } finally {
       this.sending = false;

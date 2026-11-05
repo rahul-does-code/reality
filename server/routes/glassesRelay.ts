@@ -14,8 +14,19 @@
 //                                     text {"type":"clear"}. The relay passes the latest one to every
 //                                     phone over the phone's own socket (latest wins, as above).
 //   GET /glasses/overlay.png          the latest overlay image (404 after a clear)
+// Glasses web app (glasses-webapp/, runs on the Ray-Ban Display and moves the overlay with the head):
+//   On /glasses/overlay the browser also sends text {"type":"scene",id,t,image} (followed by the
+//   scene PNG when image is true), {"type":"status",text} and {"type":"anchor",id,dx,dy,t}.
+//   ws(s)://<host>/glasses/display    relay -> web app: the latest scene (JSON then PNG), status and
+//                                     anchor, each only when it changed for that client; the web
+//                                     app's {"type":"ping",t} gets {"type":"pong",t,server}.
+//   GET /glasses/app/                 the built web app (npm run build:glasses), so one HTTPS tunnel
+//                                     to this port serves both the page and its socket.
 // Importing this module starts the server (server/proxy.ts imports it).
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 
 const PORT = Number(process.env.GLASSES_RELAY_PORT ?? 8788);
@@ -35,6 +46,81 @@ const viewers = new Map<WebSocket, Client>();
 let overlay: Buffer | "clear" | null = null;
 let overlayCount = 0;
 const phoneClients = new Map<WebSocket, Client>();
+
+// Glasses web app state: the latest of each, with a version so each client gets only what changed.
+type Versioned<T> = { v: number; value: T };
+let scene: Versioned<{ meta: string; png: Buffer | null }> = { v: 0, value: { meta: JSON.stringify({ type: "scene", id: 0, t: null, image: false }), png: null } };
+let sceneId = 0; // the browser's id of the current scene (anchors for older scenes are dropped)
+let status: Versioned<string> = { v: 0, value: JSON.stringify({ type: "status", text: "" }) };
+let anchor: Versioned<string | null> = { v: 0, value: null };
+type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number };
+const displayClients = new Map<WebSocket, DisplayClient>();
+const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../glasses-webapp/dist");
+const TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".json": "application/json",
+};
+
+function sendToDisplay(ws: WebSocket, c: DisplayClient) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (c.busy) {
+    c.dirty = true;
+    return;
+  }
+  const out: (string | Buffer)[] = [];
+  if (c.scene !== scene.v) {
+    out.push(scene.value.meta);
+    if (scene.value.png) out.push(scene.value.png);
+    c.scene = scene.v;
+  }
+  if (c.status !== status.v) {
+    out.push(status.value);
+    c.status = status.v;
+  }
+  if (c.anchor !== anchor.v && anchor.value) {
+    out.push(anchor.value);
+    c.anchor = anchor.v;
+  }
+  c.dirty = false;
+  if (!out.length) return;
+  c.busy = true;
+  out.forEach((m, i) =>
+    ws.send(m, i < out.length - 1 ? undefined : () => {
+      c.busy = false;
+      if (c.dirty) sendToDisplay(ws, c);
+    }),
+  );
+}
+
+function displayChanged() {
+  for (const [ws, c] of displayClients) sendToDisplay(ws, c);
+}
+
+function setScene(meta: string, png: Buffer | null) {
+  scene = { v: scene.v + 1, value: { meta, png } };
+  anchor = { v: anchor.v + 1, value: null }; // anchors belong to the scene they were found for
+  displayChanged();
+}
+
+function serveApp(urlPath: string, res: http.ServerResponse) {
+  const rel = decodeURIComponent(urlPath.slice("/glasses/app/".length)) || "index.html";
+  const file = path.resolve(APP_DIR, rel);
+  if (!file.startsWith(APP_DIR + path.sep)) {
+    res.writeHead(403, { "Content-Type": "text/plain" }).end("forbidden");
+    return;
+  }
+  fs.readFile(file, (err, data) => {
+    if (err) {
+      res.writeHead(404, { "Content-Type": "text/plain" }).end("not found (did you run npm run build:glasses?)");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": TYPES[path.extname(file)] ?? "application/octet-stream" }).end(data);
+  });
+}
 
 function isJpeg(buf: Buffer) {
   return buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8;
@@ -137,6 +223,14 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": latest.jpeg.length }).end(latest.jpeg);
     return;
   }
+  if (path === "/glasses/app") {
+    res.writeHead(301, { Location: "/glasses/app/" }).end();
+    return;
+  }
+  if (path.startsWith("/glasses/app/")) {
+    serveApp(path, res);
+    return;
+  }
   if (path === "/glasses/overlay.png") {
     if (!Buffer.isBuffer(overlay)) {
       res.writeHead(404, { "Content-Type": "text/plain" }).end("no overlay");
@@ -159,7 +253,7 @@ const server = http.createServer((req, res) => {
   }
   if (path === "/glasses/status") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), phoneFps, frameCount, overlayCount }));
+    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), phoneFps, frameCount, overlayCount, displays: displayClients.size, scene: sceneId }));
     return;
   }
   res.writeHead(404, { "Content-Type": "text/plain" }).end("not found");
@@ -177,18 +271,57 @@ wss.on("connection", (ws, req) => {
     return;
   }
   if (path === "/glasses/overlay") {
+    let sceneMeta: string | null = null; // a scene whose PNG is the next binary message
     ws.on("message", (data, isBinary) => {
       if (!isBinary) {
+        const text = toBuffer(data).toString();
+        let m: { type?: string; id?: unknown; image?: unknown };
         try {
-          if (JSON.parse(toBuffer(data).toString()).type === "clear") publishOverlay("clear");
+          m = JSON.parse(text);
         } catch {
-          // not a command; ignore
+          return; // not a command; ignore
+        }
+        if (m.type === "clear") {
+          publishOverlay("clear");
+          sceneId = 0;
+          setScene(JSON.stringify({ type: "scene", id: 0, t: null, image: false }), null);
+        } else if (m.type === "scene") {
+          sceneId = Number(m.id) || 0;
+          if (m.image) sceneMeta = text;
+          else setScene(text, null);
+        } else if (m.type === "status") {
+          status = { v: status.v + 1, value: text };
+          displayChanged();
+        } else if (m.type === "anchor" && Number(m.id) === sceneId) {
+          anchor = { v: anchor.v + 1, value: text };
+          displayChanged();
         }
         return;
       }
       const buf = toBuffer(data);
-      if (isPng(buf)) publishOverlay(buf);
+      if (!isPng(buf)) return;
+      if (sceneMeta) {
+        setScene(sceneMeta, buf);
+        sceneMeta = null;
+      } else publishOverlay(buf);
     });
+    return;
+  }
+  if (path === "/glasses/display") {
+    const c: DisplayClient = { busy: false, dirty: false, scene: -1, status: -1, anchor: -1 };
+    displayClients.set(ws, c);
+    console.log(`[glasses] display web app connected (${displayClients.size})`);
+    ws.on("message", (data, isBinary) => {
+      if (isBinary) return;
+      try {
+        const m = JSON.parse(toBuffer(data).toString());
+        if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, server: Date.now() }));
+      } catch {
+        // ignore
+      }
+    });
+    ws.on("close", () => displayClients.delete(ws));
+    sendToDisplay(ws, c);
     return;
   }
   // Anything else is a phone sending frames (and receiving overlays on the same socket).
