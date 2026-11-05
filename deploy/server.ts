@@ -135,6 +135,12 @@ app.use("/api", (err: { status?: number; type?: string }, _req: Request, res: Re
 
 // ---- the built app ----
 // Vite's hashed assets never change; models/wasm and index.html are revalidated.
+// Cross-origin isolation: lets ONNX Runtime (EfficientSAM) use WASM threads (see vite.config.ts).
+app.use((_req, res, next) => {
+  res.set("Cross-Origin-Opener-Policy", "same-origin");
+  res.set("Cross-Origin-Embedder-Policy", "credentialless");
+  next();
+});
 app.use("/assets", express.static(path.join(DIST, "assets"), { immutable: true, maxAge: "1y", fallthrough: false }));
 app.use(express.static(DIST, { maxAge: "1h", setHeaders: (res, file) => file.endsWith(".html") && res.set("Cache-Control", "no-cache") }));
 app.use((req, res, next) => {

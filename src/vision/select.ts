@@ -1,6 +1,10 @@
 // SELECTION: a voice `select` + frame + point -> mask. Knows nothing about operations.
 import type { NamedInstance, Select, SelectSource, SegmentNamedResponse } from "../commands/schema";
-import { segmentAt, type SegResult } from "./segmenter";
+import { MAX_POINT_COVERAGE, MIN_POINT_COVERAGE, segmentAt, type SegResult } from "./segmenter";
+import { samSegment } from "./sam";
+
+/** How long a click waits for EfficientSAM (its image embedding starts on freeze) before MediaPipe. */
+export const SAM_WAIT_MS = 4000;
 import { applyRegion, bbox, boxIoU, coverage, dilate, edgeAlpha, erode, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
@@ -29,10 +33,43 @@ export type CurrentSelection = { mask: Uint8Array; subject: Uint8Array; label: s
 // One-entry cache so a voice "pointed" select reuses the mask from the click/pinch at that point.
 let last: { frame: ImageData; x: number; y: number; allowLarge: boolean; job: Promise<SegResult> } | null = null;
 
-/** segmentAt, memoized on (frame, point). Stage's click path calls this too. */
+/**
+ * Best mask for a click: EfficientSAM (sam.ts) when its embedding for this frame is ready within
+ * SAM_WAIT_MS, else MediaPipe's segmentAt. SAM's candidates come best-first (the trained chooser's
+ * order); the first with a plausible size that contains the point wins.
+ */
+export async function segmentClick(frame: ImageData, p: Point, allowLarge = false): Promise<SegResult> {
+  const t0 = performance.now();
+  const { width: w, height: h } = frame;
+  let why = "";
+  try {
+    const r = await Promise.race([
+      samSegment(frame, [{ ...p, label: 1 }]),
+      new Promise<null>((res) => setTimeout(() => res(null), SAM_WAIT_MS)),
+    ]);
+    if (!r) why = "sam not ready";
+    else {
+      const maxCov = allowLarge ? 0.8 : MAX_POINT_COVERAGE;
+      const i = Math.min(h - 1, Math.max(0, Math.round(p.y))) * w + Math.min(w - 1, Math.max(0, Math.round(p.x)));
+      for (const m of r.masks) {
+        const cov = coverage(m);
+        if (cov < MIN_POINT_COVERAGE || cov > maxCov || !m[i]) continue;
+        const note = `sam ${r.ep}${r.encodeMs ? `, encode ${r.encodeMs}ms` : ""}`;
+        return { mask: m, source: "model", engine: "sam", ms: performance.now() - t0, coverage: cov, inside: true, note };
+      }
+      why = "sam masks implausible";
+    }
+  } catch (e) {
+    why = e instanceof Error ? e.message : String(e);
+  }
+  const mp = await segmentAt(frame, p, allowLarge);
+  return { ...mp, engine: mp.source === "model" ? "mediapipe" : undefined, ms: performance.now() - t0, note: [why, mp.note].filter(Boolean).join("; ") };
+}
+
+/** segmentClick, memoized on (frame, point). Stage's click path calls this too. */
 export function segmentPointed(frame: ImageData, p: Point, allowLarge = false): Promise<SegResult> {
   if (last && last.frame === frame && last.x === p.x && last.y === p.y && last.allowLarge === allowLarge) return last.job;
-  const job = segmentAt(frame, p, allowLarge);
+  const job = segmentClick(frame, p, allowLarge);
   last = { frame, x: p.x, y: p.y, allowLarge, job };
   return job;
 }

@@ -15,7 +15,9 @@
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
     "test:select": "tsx scripts/test-select.mts",
-    "test:mask": "tsx scripts/test-mask.mts"
+    "test:mask": "tsx scripts/test-mask.mts",
+    "test:chooser": "tsx scripts/test-chooser.mts",
+    "eval:select": "node scripts/eval-select.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",
@@ -23,6 +25,7 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
+    "onnxruntime-web": "^1.31.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "ws": "^8.22.0"

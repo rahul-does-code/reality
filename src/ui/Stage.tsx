@@ -4,6 +4,8 @@ import { startGlassesSource, stopGlassesSource } from "../input/glassesSource";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
+import { samEncode, samSegment, samStatus, warmSam, type SamPoint } from "../vision/sam";
+import type { SegResult } from "../vision/segmenter";
 import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
 import { AI_MASK_WAIT_MS, aiSegmentAt, getAiMask, onAiMask, setAiMask, type AiMaskResult } from "../vision/aiMask";
@@ -85,6 +87,8 @@ export default function Stage() {
     sel: NonNullable<CurrentSelection>;
   } | null>(null);
   const pointRef = useRef<Point | null>(null);
+  // Points behind the current SAM selection (Shift/Alt-click adds to them); null = not SAM.
+  const samPtsRef = useRef<{ frame: ImageData; pts: SamPoint[] } | null>(null);
   const segPromiseRef = useRef<Promise<void> | null>(null);
   // Last blur: the frame it was applied on, its mask, and every frame it produced, so an
   // intensity "adjust" right after re-blurs from the pre-blur frame instead of stacking.
@@ -181,6 +185,9 @@ export default function Stage() {
       });
   }, []);
 
+  // EfficientSAM: load the models now; each freeze starts encoding that frame right away.
+  useEffect(() => warmSam(), []);
+
   // Preload FaceLandmarker so the first "change my nose" doesn't wait on the model download.
   useEffect(() => {
     initFace().catch((e) => console.warn("[face] init failed", e));
@@ -221,6 +228,7 @@ export default function Stage() {
     labelRef.current = null;
     sourceRef.current = null;
     pointRef.current = null;
+    samPtsRef.current = null;
     segPromiseRef.current = null;
     aiPendingRef.current = null;
     setAiPending(false);
@@ -246,6 +254,8 @@ export default function Stage() {
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
     ctx.drawImage(video, 0, 0);
     historyRef.current.reset(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    // Start the SAM embedding now, so a click (often already on its way) decodes in ~50ms.
+    samEncode(historyRef.current.original!).catch((e) => console.warn("[sam] encode failed, clicks use MediaPipe:", e));
     setDepth(0);
     clearSelection();
     appliedRef.current = null;
@@ -310,12 +320,38 @@ export default function Stage() {
         setAlpha(null);
         setSelTag(null);
       }
+      // Shift/Alt-click on a SAM selection: one more positive/negative point and SAM re-segments
+      // with all of them (fixes the boundary), instead of OR-ing or cutting a second blob.
+      const samPrev = samPtsRef.current;
+      const samPts =
+        g.kind === "click" && mode !== "replace" && samPrev && samPrev.frame === original
+          ? [...samPrev.pts, { ...g.p, label: mode === "add" ? (1 as const) : (0 as const) }]
+          : null;
       const job = (async () => {
-        const seg =
-          g.kind === "click" ? { kind: "pointed" as const, ...(await segmentPointed(original, g.p)) } : await selectStroke(original, g.points);
+        let refined: SegResult | null = null;
+        if (samPts) {
+          try {
+            const r = await samSegment(original, samPts);
+            const m = r.masks[0];
+            refined = { mask: m, source: "model", engine: "sam", ms: r.ms, coverage: coverage(m), inside: true, note: `${samPts.length} points` };
+          } catch (e) {
+            console.warn("[sam] refine failed, combining masks instead", e);
+          }
+        }
+        const seg = refined
+          ? { kind: "pointed" as const, ...refined }
+          : g.kind === "click"
+            ? { kind: "pointed" as const, ...(await segmentPointed(original, g.p)) }
+            : await selectStroke(original, g.points);
         if (id !== reqId.current) return; // a newer gesture or a resume superseded this one
-        let mask = combine(prev, seg.mask, mode);
-        const notes = [`${seg.kind} ${seg.source} ${Math.round(seg.ms)}ms${seg.note ? ` (${seg.note})` : ""}`];
+        let mask = refined ? refined.mask : combine(prev, seg.mask, mode);
+        samPtsRef.current = refined
+          ? { frame: original, pts: samPts! }
+          : g.kind === "click" && mode === "replace" && "engine" in seg && seg.engine === "sam"
+            ? { frame: original, pts: [{ ...g.p, label: 1 }] }
+            : null;
+        const engine = "engine" in seg && seg.engine ? seg.engine : seg.source;
+        const notes = [`${seg.kind} ${engine} ${Math.round(seg.ms)}ms${seg.note ? ` (${seg.note})` : ""}`];
         if (mode !== "replace") notes.push(mode);
         let hull: Uint8Array | null = null;
         if (g.source === "finger") {
@@ -368,6 +404,7 @@ export default function Stage() {
             const name = `${r.name ?? "pointed"} (${r.source})`;
             const aiLabel = mode === "replace" ? name : `${prevLabel} ${mode === "add" ? "+" : "−"} ${name}`;
             const aiNotes = [...notes, `ai ${r.source} ${detail}`].join(" · ");
+            samPtsRef.current = null; // the AI mask replaces what the SAM points described
             applySelection({ mask: m, subject: m, alpha: edgeAlpha(m, original), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
           },
         };
@@ -1518,7 +1555,7 @@ export default function Stage() {
             </label>
           </div>
           <div className="settings-row readout">
-            segmenter: {modelState} · {readout}
+            segmenter: {modelState} · sam: {samStatus()} · {readout}
           </div>
           <div className="settings-row keys">
             Click = select · drag a loop = lasso · drag a line = scribble · Shift adds · Alt subtracts · F fullscreen

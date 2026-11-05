@@ -16,11 +16,13 @@ export type SegResult = {
   coverage: number;
   /** The point itself is in the mask (false: snapped to a blob within 14px, or the circle fallback missed it). */
   inside: boolean;
+  /** Which model made a "model" mask (absent = MediaPipe). */
+  engine?: "sam" | "mediapipe";
 };
 
 /** A pointed object covering more of the frame than this is a wrong mask (e.g. the background). */
 export const MAX_POINT_COVERAGE = 0.45;
-const MIN_POINT_COVERAGE = 0.002;
+export const MIN_POINT_COVERAGE = 0.002;
 
 let segmenterPromise: Promise<InteractiveSegmenterLegacy> | null = null;
 
@@ -39,7 +41,9 @@ async function create(delegate: "GPU" | "CPU") {
 /** Call on mount so the first click is fast. Safe to call repeatedly. */
 export function initSegmenter(): Promise<InteractiveSegmenterLegacy> {
   if (!segmenterPromise) {
-    segmenterPromise = create("GPU").catch(() => create("CPU"));
+    // The eval page (eval/select.html) can force CPU: headless Chromium's software GPU is very slow.
+    const first = (globalThis as { __SEGMENTER_DELEGATE__?: "GPU" | "CPU" }).__SEGMENTER_DELEGATE__ ?? "GPU";
+    segmenterPromise = create(first).catch(() => create("CPU"));
     segmenterPromise.catch(() => {
       segmenterPromise = null; // allow retry on next call
     });
