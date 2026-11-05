@@ -69,6 +69,35 @@ Watch it: open **http://localhost:5180/glasses-debug.html** (shows the MJPEG str
 3. Expected: `Stream: streaming`, then `DAT: ~30 fps · sent: ~12 fps · connected` in green and a preview
    of what was sent. The debug page on the laptop shows the same frames.
 
+## 6. Show the edits on the glasses (Meta Ray-Ban Display)
+
+The Ray-Ban Display has a 600x600 see-through display in the right lens. The app can put the edits
+there instead of only on the laptop screen:
+
+```
+Laptop: Stage edit -> src/edit/glassesOverlay.ts (600x600 PNG, black = see-through) -> ws /glasses/overlay
+Relay: latest overlay -> the phone, over the same socket the phone sends frames on
+iPhone: GlassesDisplay.swift -> DAT Display: display.send(FlexBox { Image(image:) })
+```
+
+1. Before tapping Start, turn on **Ray-Ban Display**. The mock is then a Meta Ray-Ban Display
+   (`.metaRayBanDisplay`), the session also gets a `Display`, and a square preview of the mock display
+   shows in the app (black there = see-through on real glasses).
+2. In the web app (Source: Glasses relay), set **Display** to **Whole frame**: freeze, select and edit as
+   usual. The display shows only what changed (the edited pixels), a white outline of the selection and
+   the voice status. Undo and clear selection update it too; going live again leaves just the status.
+3. On real glasses, use **Aligned window**: the display covers only ~20 degrees of the camera's much wider
+   view, so the overlay has to be cropped to that window. Turn on **Test pattern** (a border and a center
+   cross on the display), look at something with clear corners, and adjust **cx / cy / size** until the
+   dashed box on the laptop stage matches what the border frames on the glasses. Saved in the browser.
+
+Limits of this step: one image per update (each Display send replaces the screen, and travels over
+Bluetooth, so expect about one update a second); the overlay only lines up while the head stays where
+it was when the frame was frozen; the display adds light, so recolor reads as a tint and remove/blur
+can only draw the edited pixels over the real object, which still shows through.
+
+Laptop side without a phone: `http://localhost:8788/glasses/overlay.png` is the latest overlay.
+
 ## Try it without the iPhone (iOS Simulator)
 
 Pick **iPhone 17 Pro** (any simulator) in the device menu, press Run, type `127.0.0.1` as the IP and tap
@@ -95,14 +124,18 @@ xcrun simctl launch --terminate-running-process booted com.CHANGEME.glassesrelay
 ## Files
 
 - `GlassesRelay/RelayModel.swift`: toolkit lifecycle (mock pairing, session, camera stream)
-- `GlassesRelay/FrameSender.swift`: frame -> 640px JPEG -> WebSocket, drops frames instead of lagging
+- `GlassesRelay/FrameSender.swift`: frame -> 640px JPEG -> WebSocket, drops frames instead of lagging;
+  also receives the overlays the relay sends back
+- `GlassesRelay/GlassesDisplay.swift`: DAT Display capability, overlay PNG -> glasses display (latest wins)
 - `GlassesRelay/ContentView.swift`, `GlassesRelayApp.swift`: UI and `Wearables.configure()`
 - `GlassesRelay-Info.plist`: `MWDAT` keys (empty MetaAppID/ClientToken is fine for the mock), permissions
 - `GlassesRelay/mock-feed.mp4`: HEVC test clip for the simulator (made with ffmpeg `testsrc2`)
 
 ## Moving to real glasses later
 
-Remove the `MockDeviceKit` block in `RelayModel.start()`. Real glasses additionally need: the Meta AI app with
+Remove the `MockDeviceKit` block in `RelayModel.start()`. For the display, real Ray-Ban Display glasses
+also need the Device Access Toolkit app on the glasses (the app shows "Display needs the DAT app on the
+glasses updated" if not). Real glasses additionally need: the Meta AI app with
 Developer Mode on (or an app registered in the Wearables Developer Center, putting its MetaAppID/ClientToken
 into the Info.plist), app registration via `Wearables.shared.startRegistration()`, and the camera permission
 granted in the Meta AI app. The streaming and relay code stay the same.

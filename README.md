@@ -56,6 +56,11 @@ Run it (full steps in [ios/README.md](ios/README.md)):
 4. In the app, enter the laptop IP and tap Start streaming (allow Camera and Local Network).
 5. In the web app, set Source to "Glasses relay". `/glasses-debug.html` shows the raw relay stream.
 
+Glasses output: with "Ray-Ban Display" on in the phone app and Display set to "Whole frame" or
+"Aligned window" in the web app, the edits are shown on the Meta Ray-Ban Display itself, through the
+toolkit's Display capability (mock display preview on the phone until real glasses are available). See
+[ios/README.md](ios/README.md#6-show-the-edits-on-the-glasses-meta-ray-ban-display).
+
 ## Architecture
 
 1. Input: a swappable video source plus a pointer track (hand tracking or mouse) that emits only `PointerSample`s.

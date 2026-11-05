@@ -1,6 +1,9 @@
 // Drives the DAT lifecycle against a Mock Device Kit device:
 // enable mock -> pair mock Ray-Ban Meta -> give it a camera feed -> power on/unfold/don ->
 // DeviceSession -> Camera stream (raw, low res, 15 fps) -> FrameSender.
+// With "Ray-Ban Display" on, the mock is a Meta Ray-Ban Display and the session also gets a Display:
+// overlays coming back from the laptop on the same socket go onto it (GlassesDisplay), and the mock's
+// display preview shows on the phone.
 // Real glasses would skip the MockDeviceKit block and need Meta AI app registration instead.
 
 import AVFoundation
@@ -20,6 +23,13 @@ final class RelayModel: ObservableObject {
   @Published var sentFPS = 0
   @Published var datFPS = 0
   @Published var connected = false
+  @Published var useDisplay: Bool = UserDefaults.standard.bool(forKey: "useDisplay") {
+    didSet { UserDefaults.standard.set(useDisplay, forKey: "useDisplay") }
+  }
+  @Published var displayStatus = ""
+  @Published var overlaysShown = 0
+  /// The mock glasses' display, rendered on the phone (mock only).
+  @Published var displayPreview: UIView?
 
   private let wearables = Wearables.shared
   private var glasses: (any MockGlasses)?
@@ -27,6 +37,7 @@ final class RelayModel: ObservableObject {
   private var camera: MWDATCamera.Camera?
   private let tokens = ListenerTokenBag()
   private var sender: FrameSender?
+  private var glassesDisplay: GlassesDisplay?
   private var statsTimer: Timer?
 
   func start() async {
@@ -43,7 +54,7 @@ final class RelayModel: ObservableObject {
       status = "Pairing mock glasses..."
       let kit = MockDeviceKit.shared
       if !kit.isEnabled { kit.enable() }
-      let device = try kit.pairGlasses(model: .rayBanMeta)
+      let device = try kit.pairGlasses(model: useDisplay ? .metaRayBanDisplay : .rayBanMeta)
       glasses = device
 
       #if targetEnvironment(simulator)
@@ -62,6 +73,7 @@ final class RelayModel: ObservableObject {
       device.powerOn()
       device.unfold()
       device.don()
+      if useDisplay { displayPreview = device.services.display.createPreviewView() }
 
       // 2. Wait until the toolkit reports the (mock) device as available.
       status = "Waiting for device..."
@@ -111,6 +123,27 @@ final class RelayModel: ObservableObject {
       }.store(in: tokens)
       camera.stream.start()
 
+      // 5. Display (Ray-Ban Display only): overlays from the laptop -> the glasses display.
+      // A display failure leaves the camera stream running.
+      if useDisplay {
+        do {
+          let glassesDisplay = try GlassesDisplay.attach(to: session, tokens: tokens)
+          glassesDisplay.onShown = { [weak self] n in
+            Task { @MainActor in self?.overlaysShown = n }
+          }
+          glassesDisplay.onStatus = { [weak self] text in
+            Task { @MainActor in self?.displayStatus = text }
+          }
+          self.glassesDisplay = glassesDisplay
+          displayStatus = "Display attached"
+          sender.onOverlay = { [weak glassesDisplay] message in glassesDisplay?.handle(message) }
+        } catch DeviceSessionError.datAppOnTheGlassesUpdateRequired {
+          displayStatus = "Display needs the DAT app on the glasses updated (Meta AI app)"
+        } catch {
+          displayStatus = "Display failed: \(error.localizedDescription)"
+        }
+      }
+
       statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
         Task { @MainActor in
           guard let self, let sender = self.sender else { return }
@@ -131,6 +164,11 @@ final class RelayModel: ObservableObject {
     statsTimer?.invalidate()
     statsTimer = nil
     tokens.clear()
+    glassesDisplay?.stop()
+    glassesDisplay = nil
+    displayPreview = nil
+    displayStatus = ""
+    overlaysShown = 0
     sender?.stop()
     sender = nil
     camera?.stop()

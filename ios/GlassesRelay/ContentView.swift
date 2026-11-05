@@ -17,6 +17,8 @@ struct ContentView: View {
           .textInputAutocapitalization(.never)
           .disabled(model.running)
       }
+      Toggle("Ray-Ban Display (show edits on the glasses)", isOn: $model.useDisplay)
+        .disabled(model.running)
       Text("Sends to ws://\(model.laptopIP.isEmpty ? "<laptop-ip>" : model.laptopIP):8788")
         .font(.caption.monospaced()).foregroundStyle(.secondary)
 
@@ -35,6 +37,18 @@ struct ContentView: View {
       Text("DAT: \(model.datFPS) fps · sent: \(model.sentFPS) fps · \(model.connected ? "connected" : "not connected")")
         .font(.callout.monospacedDigit())
         .foregroundStyle(model.connected ? .green : .orange)
+      if model.useDisplay && model.running {
+        Text("\(model.displayStatus) · overlays shown: \(model.overlaysShown)")
+          .font(.callout.monospacedDigit())
+      }
+      if let preview = model.displayPreview {
+        // What the mock glasses display shows (black = see-through on real glasses).
+        HostedView(view: preview)
+          .aspectRatio(1, contentMode: .fit)
+          .frame(maxHeight: 240)
+          .background(Color.black)
+          .clipShape(RoundedRectangle(cornerRadius: 8))
+      }
 
       ZStack {
         Color.black
@@ -56,4 +70,11 @@ struct ContentView: View {
   private func hideKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
   }
+}
+
+/// Shows a UIKit view (the mock display preview) in SwiftUI.
+struct HostedView: UIViewRepresentable {
+  let view: UIView
+  func makeUIView(context: Context) -> UIView { view }
+  func updateUIView(_ uiView: UIView, context: Context) {}
 }

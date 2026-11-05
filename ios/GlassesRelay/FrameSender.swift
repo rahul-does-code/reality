@@ -1,6 +1,8 @@
 // Turns DAT video frames into JPEGs (longest side <= 480 px, q 0.5) and sends each as one binary WebSocket
 // message, preceded by a text message {"t": capture ms since 1970, "fps": send fps} for latency readouts.
 // Drops frames while an encode/send is in flight or faster than maxFPS, so it never queues up lag.
+// The same socket carries the other direction: the relay sends overlays for the Ray-Ban Display
+// (a binary PNG, or the text {"type":"clear"}), delivered through onOverlay.
 
 import CoreImage
 import CoreMedia
@@ -30,6 +32,8 @@ final class FrameSender: @unchecked Sendable {
 
   /// Called (on a background queue) with each frame that was sent, for the on-phone preview.
   var onSent: (@Sendable (UIImage) -> Void)?
+  /// Called (on a background queue) with each overlay message from the relay.
+  var onOverlay: (@Sendable (OverlayMessage) -> Void)?
 
   init(url: URL, maxFPS: Double = 15) {
     self.url = url
@@ -147,6 +151,26 @@ final class FrameSender: @unchecked Sendable {
     task = t
     lock.unlock()
     t.resume()
+    receive(on: t)
+  }
+
+  /// Reads overlay messages until the socket fails; a failed send notices that and reconnects.
+  private func receive(on t: URLSessionWebSocketTask) {
+    t.receive { [weak self] result in
+      guard let self, case .success(let message) = result else { return }
+      switch message {
+      case .data(let data):
+        self.onOverlay?(.png(data))
+      case .string(let text):
+        if text.contains("\"clear\"") { self.onOverlay?(.clear) }
+      @unknown default:
+        break
+      }
+      self.lock.lock()
+      let current = self.task === t && !self.stopped
+      self.lock.unlock()
+      if current { self.receive(on: t) }
+    }
   }
 
   /// Pixel buffer -> scaled JPEG in one Core Image pass. frame.makeUIImage() alone took 80-120 ms per
