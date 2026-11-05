@@ -7,7 +7,7 @@ import { initFace } from "../vision/face";
 import { resolveSelection, segmentPointed, type CurrentSelection, type Selection } from "../vision/select";
 import { frameJpeg } from "../vision/frameJpeg";
 import { AI_MASK_WAIT_MS, aiSegmentAt, getAiMask, onAiMask, setAiMask, type AiMaskResult } from "../vision/aiMask";
-import { bbox, coverage, feather, type Point } from "../vision/mask";
+import { bbox, coverage, edgeAlpha, type Point } from "../vision/mask";
 import { combine, isClosed, selectStroke, type CombineMode } from "../vision/lasso";
 import { handHullInFrame, removeHand } from "../vision/handMask";
 import { StrokeRecognizer, type Gesture } from "../input/strokes";
@@ -329,7 +329,7 @@ export default function Stage() {
           pointRef.current = g.p;
           setPoint(g.p);
         }
-        const sel = { mask, subject: mask, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
+        const sel = { mask, subject: mask, alpha: edgeAlpha(mask, original), note: notes.join(" · "), label, source: "pointed" as const, usedPoint };
         const how = g.kind === "click" ? (g.source === "finger" ? "pinch" : "click") : seg.kind;
         applySelection(sel, original, how);
         // Clicks and pinches only (lasso/scribble already are what the user drew): the AI mask
@@ -357,7 +357,7 @@ export default function Stage() {
             const name = `${r.name ?? "pointed"} (${r.source})`;
             const aiLabel = mode === "replace" ? name : `${prevLabel} ${mode === "add" ? "+" : "−"} ${name}`;
             const aiNotes = [...notes, `ai ${r.source} ${detail}`].join(" · ");
-            applySelection({ mask: m, subject: m, alpha: feather(m, w, h, 3), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
+            applySelection({ mask: m, subject: m, alpha: edgeAlpha(m, original), note: aiNotes, label: aiLabel, source: "pointed", usedPoint }, original, `${how} + ai`);
           },
         };
         aiPendingRef.current = token;

@@ -14,7 +14,8 @@
     "dev:all": "npm run dev",
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
-    "test:select": "tsx scripts/test-select.mts"
+    "test:select": "tsx scripts/test-select.mts",
+    "test:mask": "tsx scripts/test-mask.mts"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",

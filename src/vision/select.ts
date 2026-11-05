@@ -1,7 +1,7 @@
 // SELECTION: a voice `select` + frame + point -> mask. Knows nothing about operations.
 import type { NamedInstance, Select, SelectSource, SegmentNamedResponse } from "../commands/schema";
 import { segmentAt, type SegResult } from "./segmenter";
-import { applyRegion, bbox, boxIoU, coverage, dilate, erode, feather, invert, refineRadius, type Point } from "./mask";
+import { applyRegion, bbox, boxIoU, coverage, dilate, edgeAlpha, erode, invert, refineRadius, type Point } from "./mask";
 import { frameJpeg } from "./frameJpeg";
 import { faceMask, FACE_PARTS as MESH_PARTS, type FacePart as MeshPart } from "./face";
 import { aiSegmentWithin, getAiMask } from "./aiMask";
@@ -282,5 +282,9 @@ export async function resolveSelection(
     notes.push("inverted");
   }
   if (coverage(mask) === 0) return { error: "selection is empty" };
-  return { mask, subject: base, alpha: feather(mask, w, h, 3), note: notes.join(" · "), label, source, usedPoint };
+  // Edge-aware alpha on the subject; the background's is its exact complement, so the subject's
+  // pixels stay identical and the seam between them is shared.
+  const subjectAlpha = edgeAlpha(base, frame);
+  const alpha = inverted ? subjectAlpha.map((v) => 1 - v) : subjectAlpha;
+  return { mask, subject: base, alpha, note: notes.join(" · "), label, source, usedPoint };
 }
