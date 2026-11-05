@@ -24,6 +24,11 @@
 //   The phone sends text {"type":"transcript",text,final} (glasses mic, DAT Speech) on its socket; the
 //   web app sends {"type":"input",action:"select"|"undo"|"done"} (pinch on its buttons) on its socket.
 //   ws://<laptop-ip>:8788/glasses/events  relay -> laptop browser: both, as they arrive (src/input/glassesEvents.ts)
+// DIY glasses (hardware/glasses, firmware/reality-glasses): the ESP32 connects like the phone (camera
+//   JPEGs on "/"), and on /glasses/display?raw=N gets each scene as N x N raw RGB565 (little-endian,
+//   downscaled from the PNG here) after {"type":"scene",...,"fmt":"rgb565","w":N,"h":N}. Push-to-talk
+//   audio arrives on its "/" socket as a binary WAV (16 kHz mono); laptop browsers get it on
+//   /glasses/events as {"type":"audio"} followed by the WAV.
 //   GET /glasses/app/                 the built web app (npm run build:glasses), so one HTTPS tunnel
 //                                     to this port serves both the page and its socket.
 // Importing this module starts the server (server/proxy.ts imports it).
@@ -32,6 +37,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
+import { PNG } from "pngjs";
 
 const PORT = Number(process.env.GLASSES_RELAY_PORT ?? 8788);
 const BOUNDARY = "glassesframe";
@@ -57,13 +63,26 @@ let scene: Versioned<{ meta: string; png: Buffer | null }> = { v: 0, value: { me
 let sceneId = 0; // the browser's id of the current scene (anchors for older scenes are dropped)
 let status: Versioned<string> = { v: 0, value: JSON.stringify({ type: "status", text: "" }) };
 let anchor: Versioned<string | null> = { v: 0, value: null };
-type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number };
+type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number; raw: number | null };
 const displayClients = new Map<WebSocket, DisplayClient>();
 const eventClients = new Set<WebSocket>();
 
 /** Passes a glasses event (transcript or button) to every laptop browser listening. */
 function publishEvent(json: string) {
   for (const ws of eventClients) if (ws.readyState === WebSocket.OPEN) ws.send(json);
+}
+
+/** Push-to-talk audio from the DIY glasses: {"type":"audio"} then the WAV, to every laptop browser. */
+function publishAudio(wav: Buffer) {
+  for (const ws of eventClients)
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "audio", t: Date.now() }));
+      ws.send(wav);
+    }
+}
+
+function isWav(buf: Buffer) {
+  return buf.length > 44 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE";
 }
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../glasses-webapp/dist");
 const TYPES: Record<string, string> = {
@@ -75,6 +94,48 @@ const TYPES: Record<string, string> = {
   ".json": "application/json",
 };
 
+// Scene PNG -> N x N RGB565 for the DIY glasses, cached per scene version and size.
+let decoded: { v: number; png: PNG } | null = null;
+const rawCache = new Map<number, { v: number; buf: Buffer }>();
+function toRgb565(png: PNG, n: number): Buffer {
+  const out = Buffer.alloc(n * n * 2);
+  const { width: w, height: h, data } = png;
+  for (let oy = 0; oy < n; oy++) {
+    const y0 = Math.floor((oy * h) / n), y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * h) / n));
+    for (let ox = 0; ox < n; ox++) {
+      const x0 = Math.floor((ox * w) / n), x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * w) / n));
+      let r = 0, g = 0, b = 0, cnt = 0;
+      for (let y = y0; y < y1; y++)
+        for (let x = x0; x < x1; x++) {
+          const i = (y * w + x) * 4;
+          const a = data[i + 3] / 255; // transparent = black (no light)
+          r += data[i] * a;
+          g += data[i + 1] * a;
+          b += data[i + 2] * a;
+          cnt++;
+        }
+      r /= cnt; g /= cnt; b /= cnt;
+      out.writeUInt16LE(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3), (oy * n + ox) * 2);
+    }
+  }
+  return out;
+}
+function rawScene(n: number): Buffer | null {
+  const png = scene.value.png;
+  if (!png) return null;
+  const hit = rawCache.get(n);
+  if (hit && hit.v === scene.v) return hit.buf;
+  try {
+    if (decoded?.v !== scene.v) decoded = { v: scene.v, png: PNG.sync.read(png) };
+    const buf = toRgb565(decoded.png, n);
+    rawCache.set(n, { v: scene.v, buf });
+    return buf;
+  } catch (e) {
+    console.error("[glasses] scene PNG decode failed:", (e as Error).message);
+    return null;
+  }
+}
+
 function sendToDisplay(ws: WebSocket, c: DisplayClient) {
   if (ws.readyState !== WebSocket.OPEN) return;
   if (c.busy) {
@@ -83,8 +144,14 @@ function sendToDisplay(ws: WebSocket, c: DisplayClient) {
   }
   const out: (string | Buffer)[] = [];
   if (c.scene !== scene.v) {
-    out.push(scene.value.meta);
-    if (scene.value.png) out.push(scene.value.png);
+    if (c.raw) {
+      const raw = rawScene(c.raw);
+      out.push(JSON.stringify({ ...JSON.parse(scene.value.meta), image: !!raw, fmt: "rgb565", w: c.raw, h: c.raw }));
+      if (raw) out.push(raw);
+    } else {
+      out.push(scene.value.meta);
+      if (scene.value.png) out.push(scene.value.png);
+    }
     c.scene = scene.v;
   }
   if (c.status !== status.v) {
@@ -318,9 +385,11 @@ wss.on("connection", (ws, req) => {
     return;
   }
   if (path === "/glasses/display") {
-    const c: DisplayClient = { busy: false, dirty: false, scene: -1, status: -1, anchor: -1 };
+    const rawN = Number(new URL(req.url ?? "/", "http://x").searchParams.get("raw"));
+    const raw = Number.isInteger(rawN) && rawN >= 16 && rawN <= 320 ? rawN : null;
+    const c: DisplayClient = { busy: false, dirty: false, scene: -1, status: -1, anchor: -1, raw };
     displayClients.set(ws, c);
-    console.log(`[glasses] display web app connected (${displayClients.size})`);
+    console.log(`[glasses] display ${raw ? `(DIY glasses, ${raw}x${raw} RGB565)` : "web app"} connected (${displayClients.size})`);
     ws.on("message", (data, isBinary) => {
       if (isBinary) return;
       try {
@@ -365,6 +434,10 @@ wss.on("connection", (ws, req) => {
       return;
     }
     const buf = toBuffer(data);
+    if (isWav(buf)) {
+      publishAudio(buf);
+      return;
+    }
     if (isJpeg(buf)) publish(buf, tPhone);
     tPhone = null;
   });

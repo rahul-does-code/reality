@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { glassesFrameTimes, startGlassesSource, stopGlassesSource } from "../input/glassesSource";
 import { ObjectTracker, overlayBox } from "../vision/track";
-import { listenGlassesEvents, type GlassesEvent } from "../input/glassesEvents";
+import { listenGlassesEvents, transcribeGlassesAudio, type GlassesEvent } from "../input/glassesEvents";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
@@ -985,16 +985,28 @@ export default function Stage() {
       }
       const listening = listenUntilRef.current > Date.now();
       if (!listening && !glassesAlwaysListen) return;
+      listenUntilRef.current = 0;
+      clearTimeout(listenTimerRef.current);
+      const command = (text: string) => {
+        if (!historyRef.current.current) glassesAim();
+        void runCommand(text, new Timeline("glasses", "transcript"), "glasses");
+      };
+      if (e.type === "audio") {
+        // DIY glasses push-to-talk: transcribe the clip, then run it as the command.
+        setVoiceStatus("transcribing...");
+        transcribeGlassesAudio(e.wav).then(
+          (text) => (text.trim() ? command(text.trim()) : setVoiceStatus("didn't catch that")),
+          (err) => setVoiceStatus(`transcribe failed: ${err instanceof Error ? err.message : String(err)}`),
+        );
+        return;
+      }
       const text = e.text.trim();
       if (!e.final) {
         if (text) setVoiceStatus(`listening... "${text}"`);
+        listenUntilRef.current = Date.now() + GLASSES_LISTEN_MS; // still talking: keep listening
         return;
       }
-      if (!text) return;
-      listenUntilRef.current = 0;
-      clearTimeout(listenTimerRef.current);
-      if (!historyRef.current.current) glassesAim();
-      void runCommand(text, new Timeline("glasses", "transcript"), "glasses");
+      if (text) command(text);
     },
     [glassesAim, glassesListen, undo, resume, runCommand, glassesAlwaysListen],
   );

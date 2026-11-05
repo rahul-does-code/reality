@@ -16,7 +16,8 @@
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
     "test:select": "tsx scripts/test-select.mts",
-    "test:glasses": "node scripts/test-glasses-webapp.mjs"
+    "test:glasses": "node scripts/test-glasses-webapp.mjs",
+    "test:diy": "node scripts/test-glasses-diy.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",
@@ -24,6 +25,7 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
+    "pngjs": "^7.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "ws": "^8.22.0"
@@ -32,6 +34,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/ws": "^8.18.2",
