@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=600, height=600, initial-scale=1.0" />
+    <meta name="description" content="Reality is yours: shows the edits you made to the world, on the object, as you look around." />
+    <meta name="mrbd-web-app-capable" content="yes" />
+    <title>Reality is yours</title>
+    <style>
+      /* Additive display: black emits no light, so the page background is see-through. */
+      html, body { margin: 0; width: 600px; height: 600px; overflow: hidden; background: #000; color: #fff;
+        font-family: system-ui, sans-serif; }
+      #view { position: absolute; inset: 0; width: 600px; height: 600px; }
+      #controls { position: absolute; top: 24px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center;
+        transition: opacity 0.3s; }
+      #controls.faded { opacity: 0; }
+      button { min-height: 64px; padding: 0 24px; border-radius: 32px; border: 2px solid transparent; font: 600 18px system-ui, sans-serif;
+        color: #fff; background: #1c1e21; }
+      button:focus { outline: none; border-color: #fff; }
+      button:disabled { color: #b0b3b8; }
+      #status { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: 552px;
+        padding: 10px 20px; border-radius: 22px; background: #1c1e21; font: 600 20px system-ui, sans-serif;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      #hud { position: absolute; top: 104px; left: 24px; margin: 0; padding: 8px 12px; border-radius: 8px;
+        background: #1c1e21; font: 14px ui-monospace, monospace; color: #e4e6eb; }
+    </style>
+  </head>
+  <body>
+    <canvas id="view" width="600" height="600"></canvas>
+    <div id="controls">
+      <button id="start">Start</button>
+      <button id="calibrate" hidden>Calibrate</button>
+      <button id="info" hidden>Info</button>
+    </div>
+    <pre id="hud" hidden></pre>
+    <div id="status" hidden></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "concurrently -n web,api,info -c magenta,cyan,green \"npm:dev:web\" \"npm:server\" \"node scripts/dev-banner.mjs\"",
     "dev:web": "vite --host",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && npm run build:glasses",
+    "build:glasses": "vite build --config glasses-webapp/vite.config.ts",
     "build:prod": "node scripts/setup.mjs && npm run build",
     "preview": "vite preview --host",
     "start:prod": "NODE_ENV=production node --import tsx deploy/server.ts",
@@ -14,7 +15,8 @@
     "dev:all": "npm run dev",
     "test:commands": "node scripts/test-commands.mjs",
     "test:edit": "node scripts/test-edit.mjs",
-    "test:select": "tsx scripts/test-select.mts"
+    "test:select": "tsx scripts/test-select.mts",
+    "test:glasses": "node scripts/test-glasses-webapp.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^1.1.1",
@@ -35,6 +37,7 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^10.0.6",
+    "playwright": "1.63.0",
     "tsx": "^4.23.15",
     "typescript": "^5.5.4",
     "vite": "^5.4.0"

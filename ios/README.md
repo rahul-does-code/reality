@@ -98,6 +98,10 @@ can only draw the edited pixels over the real object, which still shows through.
 
 Laptop side without a phone: `http://localhost:8788/glasses/overlay.png` is the latest overlay.
 
+The glasses web app ([../glasses-webapp/README.md](../glasses-webapp/README.md)) removes the first two
+limits: it runs on the glasses, redraws every frame and moves the overlay with the head. When using it,
+leave the toggle above off; this app then only streams the camera.
+
 ## Try it without the iPhone (iOS Simulator)
 
 Pick **iPhone 17 Pro** (any simulator) in the device menu, press Run, type `127.0.0.1` as the IP and tap

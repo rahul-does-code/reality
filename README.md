@@ -59,7 +59,10 @@ Run it (full steps in [ios/README.md](ios/README.md)):
 Glasses output: with "Ray-Ban Display" on in the phone app and Display set to "Whole frame" or
 "Aligned window" in the web app, the edits are shown on the Meta Ray-Ban Display itself, through the
 toolkit's Display capability (mock display preview on the phone until real glasses are available). See
-[ios/README.md](ios/README.md#6-show-the-edits-on-the-glasses-meta-ray-ban-display).
+[ios/README.md](ios/README.md#6-show-the-edits-on-the-glasses-meta-ray-ban-display). To keep the overlay
+on the object as you move, run the glasses web app instead: it draws on the glasses, shifts the overlay
+with the glasses' gyro and re-anchors it from the laptop's object tracker. See
+[glasses-webapp/README.md](glasses-webapp/README.md).
 
 ## Architecture
 
