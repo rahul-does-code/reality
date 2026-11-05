@@ -19,8 +19,9 @@ Headless numbers use the CPU (no GPU), so absolute latencies are pessimistic; co
 
 - **Assumption:** EfficientSAM-Ti (Apache-2.0) is the click segmenter, run in the browser, with
   MediaPipe as fallback. Larger SAMs (SAM 2, SAM ViT-B) were not downloadable from this machine.
-- **Assumption:** a click waits up to 4s (`SAM_WAIT_MS`) for SAM before falling back to MediaPipe.
-  The embedding starts on freeze, so on WebGPU the wait is usually a few hundred ms.
+- **Assumption:** a click never waits for SAM: MediaPipe's mask shows at once and SAM's replaces it
+  when the frame's embedding (started on freeze) is ready. Only a voice "that"/"this" selection
+  waits, up to 4s (`SAM_WAIT_MS`), since speech is already slower than that.
 - **Assumption:** models are downloaded by `scripts/setup.mjs` (EfficientSAM GitHub repo) rather
   than committed.
 - Not done: fine-tuning SAM's decoder. The training script worked, but exporting the fine-tuned
