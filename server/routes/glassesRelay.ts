@@ -9,6 +9,11 @@
 //   GET /glasses/stream.mjpg          latest frames as multipart MJPEG (open in any browser tab)
 //   GET /glasses/latest.jpg           the latest frame
 //   GET /glasses/status               JSON: connected phones, fps in, frame count
+// Overlay channel, the other direction (what the Ray-Ban Display shows, see src/edit/glassesOverlay.ts):
+//   ws://<laptop-ip>:8788/glasses/overlay  browser -> relay, one binary 600x600 PNG per message, or the
+//                                     text {"type":"clear"}. The relay passes the latest one to every
+//                                     phone over the phone's own socket (latest wins, as above).
+//   GET /glasses/overlay.png          the latest overlay image (404 after a clear)
 // Importing this module starts the server (server/proxy.ts imports it).
 import http from "node:http";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
@@ -26,6 +31,10 @@ let phoneFps = 0; // send fps the phone reports
 const arrivals: number[] = []; // ms timestamps of the last second of frames, for fps
 const mjpegClients = new Map<http.ServerResponse, Client>();
 const viewers = new Map<WebSocket, Client>();
+// Overlay for the glasses display: null = nothing sent yet, "clear" = blank the display.
+let overlay: Buffer | "clear" | null = null;
+let overlayCount = 0;
+const phoneClients = new Map<WebSocket, Client>();
 
 function isJpeg(buf: Buffer) {
   return buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8;
@@ -81,6 +90,32 @@ function sendToMjpeg(res: http.ServerResponse, c: Client) {
   }
 }
 
+function sendOverlayToPhone(ws: WebSocket, c: Client) {
+  if (overlay === null || ws.readyState !== WebSocket.OPEN) return;
+  if (c.busy) {
+    c.dirty = true;
+    return;
+  }
+  c.busy = true;
+  c.dirty = false;
+  const done = () => {
+    c.busy = false;
+    if (c.dirty) sendOverlayToPhone(ws, c);
+  };
+  if (overlay === "clear") ws.send(JSON.stringify({ type: "clear" }), done);
+  else ws.send(overlay, done);
+}
+
+function publishOverlay(next: Buffer | "clear") {
+  overlay = next;
+  overlayCount++;
+  for (const [ws, c] of phoneClients) sendOverlayToPhone(ws, c);
+}
+
+function isPng(buf: Buffer) {
+  return buf.length > 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+}
+
 function publish(jpeg: Buffer, tPhone: number | null) {
   latest = { jpeg, tPhone, tRelay: Date.now() };
   frameCount++;
@@ -102,6 +137,14 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "image/jpeg", "Content-Length": latest.jpeg.length }).end(latest.jpeg);
     return;
   }
+  if (path === "/glasses/overlay.png") {
+    if (!Buffer.isBuffer(overlay)) {
+      res.writeHead(404, { "Content-Type": "text/plain" }).end("no overlay");
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "image/png", "Content-Length": overlay.length }).end(overlay);
+    return;
+  }
   if (path === "/glasses/stream.mjpg") {
     res.writeHead(200, {
       "Content-Type": `multipart/x-mixed-replace; boundary=${BOUNDARY}`,
@@ -116,7 +159,7 @@ const server = http.createServer((req, res) => {
   }
   if (path === "/glasses/status") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), phoneFps, frameCount }));
+    res.end(JSON.stringify({ phones, viewers: viewers.size, mjpegClients: mjpegClients.size, fpsIn: fpsIn(), phoneFps, frameCount, overlayCount }));
     return;
   }
   res.writeHead(404, { "Content-Type": "text/plain" }).end("not found");
@@ -133,8 +176,26 @@ wss.on("connection", (ws, req) => {
     ws.on("close", () => viewers.delete(ws));
     return;
   }
-  // Anything else is a phone sending frames.
+  if (path === "/glasses/overlay") {
+    ws.on("message", (data, isBinary) => {
+      if (!isBinary) {
+        try {
+          if (JSON.parse(toBuffer(data).toString()).type === "clear") publishOverlay("clear");
+        } catch {
+          // not a command; ignore
+        }
+        return;
+      }
+      const buf = toBuffer(data);
+      if (isPng(buf)) publishOverlay(buf);
+    });
+    return;
+  }
+  // Anything else is a phone sending frames (and receiving overlays on the same socket).
   phones++;
+  const phoneClient = { busy: false, dirty: false };
+  phoneClients.set(ws, phoneClient);
+  sendOverlayToPhone(ws, phoneClient);
   console.log(`[glasses] phone connected from ${req.socket.remoteAddress} (${phones} total)`);
   let tPhone: number | null = null; // from the text message that precedes each frame
   ws.on("message", (data, isBinary) => {
@@ -153,6 +214,7 @@ wss.on("connection", (ws, req) => {
     tPhone = null;
   });
   ws.on("close", () => {
+    phoneClients.delete(ws);
     phones--;
     console.log(`[glasses] phone disconnected (${phones} left, ${frameCount} frames so far)`);
   });

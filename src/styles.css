@@ -116,3 +116,5 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   display: block; height: 22px; padding: 3px 10px; font-size: 12px; opacity: 0.8;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums;
 }
+/* Ray-Ban Display window over the stage (frame coordinates, inside the mirrored layer). */
+.glasses-window { position: absolute; border: 2px dashed rgba(120, 220, 255, 0.9); pointer-events: none; box-sizing: border-box; }

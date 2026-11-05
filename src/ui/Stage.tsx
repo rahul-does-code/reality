@@ -19,6 +19,14 @@ import { replaceObject } from "../edit/replace";
 import { editTimeoutMs, maskDataUrl } from "../edit/modelEdit";
 import { Timeline } from "../commands/timeline";
 import { LiveRecolor } from "../edit/liveRecolor";
+import {
+  DEFAULT_ALIGNED,
+  GlassesOverlaySink,
+  displayWindow,
+  loadGlassesView,
+  saveGlassesView,
+  type GlassesView,
+} from "../edit/glassesOverlay";
 
 const CROSSFADE_MS = 400;
 import { speechSupported } from "../input/speech";
@@ -125,6 +133,12 @@ export default function Stage() {
   // Hold B: the original frozen frame on a layer above the edit (display only, history untouched).
   const compareRef = useRef<HTMLCanvasElement>(null);
   const [comparing, setComparing] = useState(false);
+  // Ray-Ban Display output (glasses source only): which part of the frame the display covers, a
+  // calibration pattern toggle, and a counter bumped on every push/undo so the display follows edits.
+  const [glassesView, setGlassesView] = useState<GlassesView>(loadGlassesView);
+  const [glassesTest, setGlassesTest] = useState(false);
+  const [editTick, setEditTick] = useState(0);
+  const overlaySinkRef = useRef<GlassesOverlaySink | null>(null);
 
   // Voice: hold V (or the mic button) to talk; release -> transcript -> Gemini -> dispatch.
   const pttRef = useRef<PushToTalkLike | null>(null);
@@ -258,6 +272,7 @@ export default function Stage() {
     const frame = historyRef.current.undo();
     if (frame) canvas.getContext("2d")!.putImageData(frame, 0, 0);
     setDepth(historyRef.current.depth);
+    setEditTick((t) => t + 1);
   }, []);
 
   const drawStroke = useCallback((points: Point[]) => {
@@ -434,6 +449,7 @@ export default function Stage() {
     canvasRef.current?.getContext("2d")!.putImageData(out, 0, 0);
     historyRef.current.push(out);
     setDepth(historyRef.current.depth);
+    setEditTick((t) => t + 1);
   }, []);
 
   /** Remember an applied edit with the selection it used (see appliedRef). */
@@ -1138,6 +1154,32 @@ export default function Stage() {
     return () => window.removeEventListener("unhandledrejection", onRejection);
   }, [showToast]);
 
+  // Glasses display: the overlay socket is open while the source is the glasses relay and output is on.
+  const overlayOn = source === "glasses" && glassesView.mode !== "off";
+  useEffect(() => {
+    if (!overlayOn) return;
+    const sink = new GlassesOverlaySink();
+    overlaySinkRef.current = sink;
+    return () => {
+      sink.clear();
+      sink.close();
+      overlaySinkRef.current = null;
+    };
+  }, [overlayOn]);
+  useEffect(() => {
+    saveGlassesView(glassesView);
+    const h = historyRef.current;
+    overlaySinkRef.current?.update({
+      original: frozen ? h.original : null,
+      current: frozen ? h.current : null,
+      alpha: frozen ? alpha : null,
+      status: voiceStatus === "hold V to talk" ? "" : voiceStatus, // the idle hint is for the laptop
+      view: glassesView,
+      test: glassesTest,
+    });
+  }, [overlayOn, frozen, editTick, alpha, voiceStatus, glassesView, glassesTest]);
+  const glassesWin = glassesView.mode === "aligned" ? displayWindow(glassesView, size.w, size.h) : null;
+
   // Cycling hint: what to point at and say.
   const [hint, setHint] = useState(0);
   useEffect(() => {
@@ -1202,6 +1244,18 @@ export default function Stage() {
           <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
           <canvas ref={strokeRef} width={size.w} height={size.h} className="layer" style={{ pointerEvents: "none" }} />
           <canvas ref={compareRef} className="layer" style={{ pointerEvents: "none", display: frozen && comparing ? "block" : "none" }} />
+          {overlayOn && glassesWin && (
+            <div
+              className="glasses-window"
+              title="What the Ray-Ban Display covers"
+              style={{
+                left: `${(glassesWin.x / size.w) * 100}%`,
+                top: `${(glassesWin.y / size.h) * 100}%`,
+                width: `${(glassesWin.side / size.w) * 100}%`,
+                height: `${(glassesWin.side / size.h) * 100}%`,
+              }}
+            />
+          )}
           {frozen && point && (
             <div
               className="marker"
@@ -1370,6 +1424,46 @@ export default function Stage() {
           <option value="webcam">Webcam</option>
           <option value="glasses">Glasses relay</option>
         </select>
+        {source === "glasses" && (
+          <label className="check" title="What the Ray-Ban Display shows: only the edits (black is see-through)">
+            Display
+            <select
+              value={glassesView.mode}
+              onChange={(e) => {
+                const m = e.target.value;
+                setGlassesView(m === "aligned" ? { mode: "aligned", ...DEFAULT_ALIGNED } : { mode: m as "off" | "whole" });
+              }}
+            >
+              <option value="off">Off</option>
+              <option value="whole">Whole frame</option>
+              <option value="aligned">Aligned window</option>
+            </select>
+          </label>
+        )}
+        {overlayOn && glassesView.mode === "aligned" &&
+          (["cx", "cy", "size"] as const).map((k) => (
+            <label className="check" key={k} title="Display window: center x/y and side, as fractions of the frame">
+              {k}
+              <input
+                type="number"
+                step={0.01}
+                min={0.05}
+                max={1}
+                style={{ width: "4.5em" }}
+                value={glassesView[k]}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v)) setGlassesView({ ...glassesView, [k]: v });
+                }}
+              />
+            </label>
+          ))}
+        {overlayOn && (
+          <label className="check" title="Show a border and center cross on the display to line it up with the window">
+            <input type="checkbox" checked={glassesTest} onChange={(e) => setGlassesTest(e.target.checked)} />
+            Test pattern
+          </label>
+        )}
         {source === "webcam" && cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
             <option value="">Default camera</option>
