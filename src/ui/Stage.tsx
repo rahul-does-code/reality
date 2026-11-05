@@ -32,6 +32,10 @@ import type { Command, Select } from "../commands/schema";
 const MAX_EDIT_COVERAGE = 0.6;
 const TOO_BIG_MSG = "That selection covers most of the picture - point at the object or draw a loop around it.";
 const SWATCHES = ["#ff3ca0", "#e5322d", "#2f6bff", "#22b55e", "#ffd21f", "#8a3ffc"];
+/** Command results that mean nothing (or the wrong thing) happened: shown as a warning. */
+const FAILED_RESULT = /fail|error|first|bad color|nothing|couldn't|not found|no face|empty|covers most|superseded|discarded|only works|ignored|no prompt|still running/i;
+/** One-tap commands under the command bar; the same path as speech. */
+const CHIPS = ["make it pink", "make it gold", "make it black", "blur it", "remove it", "turn it into a cardboard box", "blur the background"];
 const HINTS = ["make it pink", "blur that", "turn that into a cardboard box", "make the taller one red", "change my nose"];
 
 /** Human message for a getUserMedia / speech failure. */
@@ -115,6 +119,9 @@ export default function Stage() {
   const [alpha, setAlpha] = useState<Float32Array | null>(null);
   const [busy, setBusy] = useState(false);
   const [showMask, setShowMask] = useState(true);
+  // The current selection has been edited: the overlay drops its tint (outline only) so the
+  // result's colors read true.
+  const [selEdited, setSelEdited] = useState(false);
   const [segInfo, setSegInfo] = useState("");
   const [modelState, setModelState] = useState<"loading" | "ready" | "failed">("loading");
   const [color, setColor] = useState(SWATCHES[0]);
@@ -133,9 +140,13 @@ export default function Stage() {
   const lastEditRef = useRef<Command | null>(null); // context for "less"/"again", sent as `previous`
   const [listening, setListening] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState(
-    speechSupported() ? "hold V to talk" : "Voice commands need the Web Speech API (Chrome/Edge). Use the text box instead.",
+    speechSupported() ? "Hold V (or the mic button) and say what to change, or type it above." : "Voice needs the Web Speech API (Chrome/Edge). Type commands above instead.",
   );
   const [devText, setDevText] = useState("");
+  // How the command line reads: listening / working / done / needs attention. meta = recognizer,
+  // parser and timings, shown dimmed (and in full in the console).
+  const [voiceTone, setVoiceTone] = useState<"idle" | "listening" | "working" | "ok" | "warn">("idle");
+  const [voiceMeta, setVoiceMeta] = useState("");
   // Model edit in flight: the mask (as a data URL) the shimmer is clipped to.
   const [thinkingMask, setThinkingMask] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -409,6 +420,15 @@ export default function Stage() {
     if (e.type === "mousedown") modeRef.current = e.shiftKey ? "add" : e.altKey ? "subtract" : "replace";
     if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, true, mirror);
   };
+  // A press on the live view freezes it and starts the same gesture on the frozen frame, so
+  // "click the thing" is one motion (a drag right away becomes a lasso or scribble).
+  const onLiveDown = (e: React.MouseEvent<HTMLElement>) => {
+    const v = videoRef.current;
+    if (frozen || e.button !== 0 || !v?.videoWidth) return;
+    modeRef.current = e.shiftKey ? "add" : e.altKey ? "subtract" : "replace";
+    freeze();
+    emitMouse(e, e.currentTarget, v.videoWidth, v.videoHeight, true, mirror);
+  };
   const onCanvasLeave = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (frozen) emitMouse(e, e.currentTarget, size.w, size.h, false, mirror);
   };
@@ -447,6 +467,7 @@ export default function Stage() {
       setAiPending(false);
       const sel = { mask, subject: subjectRef.current ?? mask, label: labelRef.current ?? "selection" };
       appliedRef.current = { ...e, before, after, sel };
+      setSelEdited(true);
     },
     [],
   );
@@ -574,6 +595,7 @@ export default function Stage() {
     console.log(`[select] source=${sourceRef.current} coverage=${(coverage(sel.mask) * 100).toFixed(1)}% point=${inside}`);
     alphaRef.current = sel.alpha;
     setAlpha(sel.alpha);
+    setSelEdited(false);
     setSegInfo(`select · ${sel.note}`);
     const { width: w, height: h } = original;
     const b = bbox(sel.mask, w, h);
@@ -779,13 +801,15 @@ export default function Stage() {
 
   // heard: which recognizer answered and how fast, e.g. "muse 640ms" (empty for typed commands).
   const runCommand = useCallback(async (transcript: string, timeline: Timeline, heard = "") => {
-    const h = heard ? `[${heard}] ` : "";
+    setVoiceMeta(heard);
     if (!transcript) {
-      setVoiceStatus(`${h}didn't catch that`);
+      setVoiceTone("warn");
+      setVoiceStatus("Didn't catch that. Try again, or type it.");
       return;
     }
     timeline.setLabel(JSON.stringify(transcript));
-    setVoiceStatus(`${h}"${transcript}" · parsing...`);
+    setVoiceTone("working");
+    setVoiceStatus(`"${transcript}" · understanding...`);
     try {
       // Frozen: Gemini also gets the original frame and the pointed position (normalized).
       const original = historyRef.current.original;
@@ -812,7 +836,7 @@ export default function Stage() {
       const pending = aiPendingRef.current;
       let aiNote = "";
       if (pending && onCurrent && !["undo", "retry", "adjust"].includes(command.op)) {
-        setVoiceStatus(`${h}"${transcript}" · waiting for AI mask...`);
+        setVoiceStatus(`"${transcript}" · waiting for the AI mask...`);
         const r = await Promise.race([pending.job, new Promise<null>((res) => setTimeout(() => res(null), AI_MASK_WAIT_MS))]);
         if (r) pending.swap(r); // no-op if onAiMask already swapped it in
         else if (aiPendingRef.current === pending) {
@@ -824,14 +848,17 @@ export default function Stage() {
         timeline.mark(r ? "ai mask ready" : "ai mask timed out");
       }
       const detail = [command.op, command.target_name, command.color].filter(Boolean).join(" ");
-      setVoiceStatus(`${h}"${transcript}" → ${detail} · working...`);
+      setVoiceStatus(`"${transcript}" → ${detail}...`);
       const result = await dispatchRef.current(command, false, timeline);
       logSelection(transcript);
       if (command.op !== "remove" && command.op !== "replace") timeline.mark("applied");
-      setVoiceStatus(`${h}"${transcript}" → ${detail} · ${result}${aiNote} · ${via} ${ms}ms`);
+      setVoiceStatus(`"${transcript}" → ${result}${aiNote}`);
+      setVoiceMeta(`${heard ? `${heard} · ` : ""}${detail} · ${via} ${ms}ms`);
+      setVoiceTone(FAILED_RESULT.test(result) ? "warn" : "ok");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setVoiceStatus(`${h}"${transcript}" · error: ${msg}`);
+      setVoiceStatus(`"${transcript}" · error: ${msg}`);
+      setVoiceTone("warn");
       showToast(`Command failed: ${msg}`);
     } finally {
       timeline.print();
@@ -844,8 +871,11 @@ export default function Stage() {
     try {
       pttRef.current.start();
       setListening(true);
+      setVoiceTone("listening");
+      setVoiceMeta("");
       setVoiceStatus("listening...");
     } catch (e) {
+      setVoiceTone("warn");
       setVoiceStatus(e instanceof Error ? e.message : String(e));
     }
   }, [voiceEngine]);
@@ -883,6 +913,7 @@ export default function Stage() {
       void runCommand(transcript, timeline, heard);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      setVoiceTone("warn");
       setVoiceStatus(msg);
       if (/not-allowed|denied|permission|microphone/i.test(msg)) showToast(permissionMessage("Microphone", e));
       else showToast(`Voice failed: ${msg}`);
@@ -1035,19 +1066,33 @@ export default function Stage() {
     const ctx = c.getContext("2d")!;
     ctx.clearRect(0, 0, c.width, c.height);
     if (!frozen || !showMask || !alpha) return;
-    const img = ctx.createImageData(size.w, size.h);
-    for (let i = 0; i < alpha.length; i++) {
-      const a = alpha[i];
-      if (a > 0.02) {
+    // Light tint so the object stays visible, plus a crisp outline where alpha crosses 0.5
+    // (2px, so it survives the canvas being scaled down to the screen).
+    const { w, h } = size;
+    const img = ctx.createImageData(w, h);
+    const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h && alpha[y * w + x] >= 0.5;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const a = alpha[i];
+        if (a <= 0.02) continue;
         const j = i * 4;
-        img.data[j] = 0;
-        img.data[j + 1] = 229;
-        img.data[j + 2] = 255;
-        img.data[j + 3] = Math.round(a * 110);
+        const edge = a >= 0.5 && (!inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1) || !inside(x - 2, y) || !inside(x + 2, y) || !inside(x, y - 2) || !inside(x, y + 2));
+        if (edge) {
+          img.data[j] = 255;
+          img.data[j + 1] = 255;
+          img.data[j + 2] = 255;
+          img.data[j + 3] = 240;
+        } else if (!selEdited) {
+          img.data[j] = 0;
+          img.data[j + 1] = 229;
+          img.data[j + 2] = 255;
+          img.data[j + 3] = Math.round(a * 70);
+        }
       }
     }
     ctx.putImageData(img, 0, 0);
-  }, [alpha, showMask, frozen, size]);
+  }, [alpha, showMask, frozen, size, selEdited]);
 
   const startCompare = useCallback(() => {
     const original = historyRef.current.original;
@@ -1145,10 +1190,11 @@ export default function Stage() {
     return () => clearInterval(id);
   }, []);
 
+  // Debug readout (settings panel and the fullscreen status line).
   const readout = !frozen
     ? handMode
       ? "point with your index finger and hold V"
-      : "press Space to freeze the frame"
+      : "click anything to select it"
     : busy
       ? "segmenting..."
       : point
@@ -1156,6 +1202,22 @@ export default function Stage() {
         : selTag
           ? `selected: ${selTag.text} · ${segInfo}`
           : "click an object";
+  // What to do next, on the stage itself.
+  const coach = !frozen
+    ? handMode
+      ? "Point with your finger and hold V to talk"
+      : "Click anything to select it"
+    : busy
+      ? "Selecting..."
+      : !alpha
+        ? "Click an object, or draw a loop around it"
+        : null;
+  const canCommand = frozen && !!alpha && !busy;
+  const submitText = (text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    void runCommand(t, new Timeline("typed", "text submitted"));
+  };
 
   return (
     <div className="stage-wrap" ref={wrapRef}>
@@ -1167,7 +1229,8 @@ export default function Stage() {
             playsInline
             muted
             className="layer"
-            style={{ visibility: frozen ? "hidden" : "visible" }}
+            style={{ visibility: frozen ? "hidden" : "visible", cursor: frozen ? "default" : "crosshair" }}
+            onMouseDown={onLiveDown}
             onLoadedMetadata={(e) =>
               setSize({ w: e.currentTarget.videoWidth, h: e.currentTarget.videoHeight })
             }
@@ -1184,6 +1247,7 @@ export default function Stage() {
             style={{ display: liveOn && !frozen ? "block" : "none" }}
             onMouseMove={(e) => emitMouse(e, e.currentTarget, size.w, size.h, true, mirror)}
             onMouseLeave={(e) => emitMouse(e, e.currentTarget, size.w, size.h, false, mirror)}
+            onMouseDown={onLiveDown}
           />
           <canvas
             ref={canvasRef}
@@ -1199,7 +1263,7 @@ export default function Stage() {
             className={pendingOn ? "layer pending on" : "layer pending"}
             style={{ "--crossfade": `${CROSSFADE_MS}ms` } as React.CSSProperties}
           />
-          <canvas ref={overlayRef} className="layer" style={{ pointerEvents: "none" }} />
+          <canvas ref={overlayRef} className="layer mask-overlay" style={{ pointerEvents: "none" }} />
           <canvas ref={strokeRef} width={size.w} height={size.h} className="layer" style={{ pointerEvents: "none" }} />
           <canvas ref={compareRef} className="layer" style={{ pointerEvents: "none", display: frozen && comparing ? "block" : "none" }} />
           {frozen && point && (
@@ -1227,15 +1291,17 @@ export default function Stage() {
           </div>
         )}
         {error && <div className="error">{error}</div>}
-        <div className="badge">
+        <div className={`badge ${frozen ? (comparing ? "is-original" : "is-frozen") : "is-live"}`}>
           {frozen ? (comparing ? "ORIGINAL" : "FROZEN") : "LIVE"}
-          {busy ? " · …" : ""}
           {aiPending ? " · AI mask..." : ""}
         </div>
         {toast && <div className="error">{toast}</div>}
-        <div className="hint">
-          point, then say: <b>{HINTS[hint]}</b>
-        </div>
+        {!frozen && !error && (
+          <div className="hint">
+            then say <b>"{HINTS[hint]}"</b>
+          </div>
+        )}
+        {coach && !error && !toast && <div className={busy ? "coach busy" : "coach"}>{coach}</div>}
         {showHud && handMode && (
           <div className="hand-hud">
             <pre ref={hudRef} />
@@ -1265,128 +1331,21 @@ export default function Stage() {
             </label>
           </div>
         )}
-        <div className="badge badge-right">
-          model: {modelState}
-          {handMode && ` · hand: ${handStatus === "ready" ? (handSeen ? "tracking" : "no hand") : handStatus}`}
-          {liveInfo && ` · ${liveInfo}`}
-        </div>
+        {(modelState !== "ready" || handMode || liveInfo) && (
+          <div className="badge badge-right">
+            {modelState !== "ready" && `segmenter: ${modelState}`}
+            {handMode && `${modelState !== "ready" ? " · " : ""}hand: ${handStatus === "ready" ? (handSeen ? "tracking" : "no hand") : handStatus}`}
+            {liveInfo && ` · ${liveInfo}`}
+          </div>
+        )}
       </div>
 
-      <div className="controls">
-        {frozen ? (
-          <button onClick={resume}>Resume live (Space)</button>
-        ) : (
-          <button onClick={freeze}>Freeze (Space)</button>
-        )}
-        <button onClick={undo} disabled={depth === 0}>
-          Undo (U){depth ? ` · ${depth}` : ""}
-        </button>
-        <button onClick={applyRecolor} disabled={!frozen || !alpha || busy}>
-          Recolor (R)
-        </button>
-        <button onClick={clearSelection} disabled={!alpha && !point}>
-          Clear selection (Esc)
-        </button>
-        <button
-          disabled={!frozen}
-          onPointerDown={(e) => {
-            e.currentTarget.setPointerCapture(e.pointerId);
-            startCompare();
-          }}
-          onPointerUp={stopCompare}
-          onPointerCancel={stopCompare}
-        >
-          Hold B: original
-        </button>
-        <button onClick={saveImage}>Save image (S)</button>
-        <input
-          type="color"
-          value={color}
-          onChange={(e) => setColor(e.target.value)}
-          title="Target color"
-          className="color"
-        />
-        {SWATCHES.map((s) => (
-          <button
-            key={s}
-            className="swatch"
-            style={{ background: s, outline: s === color ? "2px solid #fff" : "none" }}
-            onClick={() => setColor(s)}
-            aria-label={`Use ${s}`}
-          />
-        ))}
-        <label className="check">
-          <input type="checkbox" checked={handMode} onChange={(e) => setHandMode(e.target.checked)} />
-          Hand mode
-        </label>
-        {handMode && (
-          <>
-            <label className="check" title="How far past the fingertip to point, in finger-segment lengths (not while pinching)">
-              Aim ahead
-              <input
-                type="range"
-                min={0}
-                max={3}
-                step={0.1}
-                value={aimAhead}
-                onChange={(e) => setAimAhead(Number(e.target.value))}
-              />
-              {aimAhead.toFixed(1)}
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={showHud} onChange={(e) => setShowHud(e.target.checked)} />
-              Hand HUD
-            </label>
-          </>
-        )}
-        <label className="check" title="Recolor the pointed object on the live video (finger or mouse hover)">
-          <input type="checkbox" checked={liveOn} onChange={(e) => setLiveOn(e.target.checked)} />
-          Live recolor
-        </label>
-        <label className="check" title="Clicks and pinches also get a vision + SAM 3.1 mask, swapped in when it arrives (~2-5s)">
-          <input
-            type="checkbox"
-            checked={aiOn}
-            onChange={(e) => {
-              setAiOn(e.target.checked);
-              setAiMask(e.target.checked ? "always" : "off");
-              if (!e.target.checked) {
-                aiPendingRef.current = null;
-                setAiPending(false);
-              }
-            }}
-          />
-          AI mask
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />
-          Show mask
-        </label>
-        <label className="check">
-          <input type="checkbox" checked={mirror} onChange={(e) => setMirror(e.target.checked)} />
-          Mirror view
-        </label>
-        <select value={source} onChange={(e) => switchSource(e.target.value as "webcam" | "glasses")}>
-          <option value="webcam">Webcam</option>
-          <option value="glasses">Glasses relay</option>
-        </select>
-        {source === "webcam" && cameras.length > 1 && (
-          <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
-            <option value="">Default camera</option>
-            {cameras.map((c, i) => (
-              <option key={c.deviceId} value={c.deviceId}>
-                {c.label || `Camera ${i + 1}`}
-              </option>
-            ))}
-          </select>
-        )}
-        <span className="readout">{readout}</span>
-      </div>
-
-      <div className="voice">
+      {/* Command bar: speak or type what to change; the chips run the same path. */}
+      <div className="command">
         <button
           className={listening ? "mic on" : "mic"}
           disabled={!voiceSupported(voiceEngine)}
+          title="Hold to talk (V)"
           onPointerDown={(e) => {
             e.currentTarget.setPointerCapture(e.pointerId);
             pttDown();
@@ -1394,32 +1353,178 @@ export default function Stage() {
           onPointerUp={() => void stopTalking()}
           onPointerCancel={() => void stopTalking()}
         >
-          {listening ? "● Listening" : "Hold to talk (V)"}
+          <span className="mic-dot" aria-hidden />
+          {listening ? "Listening" : "Hold V"}
         </button>
-        {import.meta.env.DEV && (
-          <form
-            className="dev-cmd"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void runCommand(devText.trim(), new Timeline("typed", "text submitted"));
-            }}
-          >
-            <input
-              value={devText}
-              onChange={(e) => setDevText(e.target.value)}
-              placeholder="dev: type a command, e.g. make that red"
-            />
-          </form>
-        )}
-        <label className="check" title="Speech recognizer. Muse falls back to Web Speech on any error.">
-          Voice
-          <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
-            <option value="webspeech">Web Speech</option>
-            <option value="muse">Muse</option>
-          </select>
-        </label>
-        <span className="voice-status">{voiceStatus}</span>
+        <form
+          className="command-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitText(devText);
+          }}
+        >
+          <input
+            value={devText}
+            onChange={(e) => setDevText(e.target.value)}
+            placeholder={frozen ? "What should change? e.g. make it pink" : "Select something first, then say or type what to change"}
+            aria-label="Command"
+          />
+          <button type="submit" className="primary" disabled={!devText.trim()}>
+            Go
+          </button>
+        </form>
       </div>
+      <div className={`result tone-${voiceTone}`}>
+        <span className="result-text">{voiceStatus}</span>
+        {voiceMeta && <span className="result-meta">{voiceMeta}</span>}
+      </div>
+      <div className="chips">
+        {CHIPS.map((c) => (
+          <button key={c} className="chip" disabled={!canCommand} onClick={() => submitText(c)}>
+            {c}
+          </button>
+        ))}
+      </div>
+
+      <div className="toolbar">
+        <div className="group">
+          {frozen ? (
+            <button onClick={resume}>Resume live <kbd>Space</kbd></button>
+          ) : (
+            <button onClick={freeze}>Freeze <kbd>Space</kbd></button>
+          )}
+          <button onClick={undo} disabled={depth === 0}>
+            Undo{depth ? ` (${depth})` : ""} <kbd>U</kbd>
+          </button>
+          <button onClick={clearSelection} disabled={!alpha && !point}>
+            Deselect <kbd>Esc</kbd>
+          </button>
+          <button
+            disabled={!frozen || depth === 0}
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              startCompare();
+            }}
+            onPointerUp={stopCompare}
+            onPointerCancel={stopCompare}
+          >
+            Hold to compare <kbd>B</kbd>
+          </button>
+          <button onClick={saveImage}>Save <kbd>S</kbd></button>
+        </div>
+        <div className="group">
+          {SWATCHES.map((s) => (
+            <button
+              key={s}
+              className={s === color ? "swatch on" : "swatch"}
+              style={{ background: s }}
+              onClick={() => setColor(s)}
+              aria-label={`Use ${s}`}
+            />
+          ))}
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            title="Pick any color"
+            className="color"
+          />
+          <button onClick={applyRecolor} disabled={!canCommand}>
+            Recolor <kbd>R</kbd>
+          </button>
+        </div>
+      </div>
+
+      <details className="settings">
+        <summary>Settings &amp; debug</summary>
+        <div className="settings-body">
+          <div className="settings-row">
+            <label className="check">
+              Source
+              <select value={source} onChange={(e) => switchSource(e.target.value as "webcam" | "glasses")}>
+                <option value="webcam">Webcam</option>
+                <option value="glasses">Glasses relay</option>
+              </select>
+            </label>
+            {source === "webcam" && cameras.length > 1 && (
+              <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
+                <option value="">Default camera</option>
+                {cameras.map((c, i) => (
+                  <option key={c.deviceId} value={c.deviceId}>
+                    {c.label || `Camera ${i + 1}`}
+                  </option>
+                ))}
+              </select>
+            )}
+            <label className="check" title="Speech recognizer. Muse falls back to Web Speech on any error.">
+              Voice
+              <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
+                <option value="webspeech">Web Speech</option>
+                <option value="muse">Muse</option>
+              </select>
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={mirror} onChange={(e) => setMirror(e.target.checked)} />
+              Mirror view
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={showMask} onChange={(e) => setShowMask(e.target.checked)} />
+              Show mask
+            </label>
+            <label className="check" title="Clicks and pinches also get a vision + SAM 3.1 mask, swapped in when it arrives (~2-5s)">
+              <input
+                type="checkbox"
+                checked={aiOn}
+                onChange={(e) => {
+                  setAiOn(e.target.checked);
+                  setAiMask(e.target.checked ? "always" : "off");
+                  if (!e.target.checked) {
+                    aiPendingRef.current = null;
+                    setAiPending(false);
+                  }
+                }}
+              />
+              AI mask
+            </label>
+          </div>
+          <div className="settings-row">
+            <label className="check">
+              <input type="checkbox" checked={handMode} onChange={(e) => setHandMode(e.target.checked)} />
+              Hand mode
+            </label>
+            {handMode && (
+              <>
+                <label className="check" title="How far past the fingertip to point, in finger-segment lengths (not while pinching)">
+                  Aim ahead
+                  <input
+                    type="range"
+                    min={0}
+                    max={3}
+                    step={0.1}
+                    value={aimAhead}
+                    onChange={(e) => setAimAhead(Number(e.target.value))}
+                  />
+                  {aimAhead.toFixed(1)}
+                </label>
+                <label className="check">
+                  <input type="checkbox" checked={showHud} onChange={(e) => setShowHud(e.target.checked)} />
+                  Hand HUD
+                </label>
+              </>
+            )}
+            <label className="check" title="Recolor the pointed object on the live video (finger or mouse hover)">
+              <input type="checkbox" checked={liveOn} onChange={(e) => setLiveOn(e.target.checked)} />
+              Live recolor
+            </label>
+          </div>
+          <div className="settings-row readout">
+            segmenter: {modelState} · {readout}
+          </div>
+          <div className="settings-row keys">
+            Click = select · drag a loop = lasso · drag a line = scribble · Shift adds · Alt subtracts · F fullscreen
+          </div>
+        </div>
+      </details>
       {/* Fullscreen (F) hides the controls; this thin line keeps the status visible. */}
       <div className="status-line">
         {readout} · {voiceStatus}

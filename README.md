@@ -31,10 +31,12 @@ Create `.env` in the project root (never committed). Variable names:
 npm run dev:all          # web app on http://localhost:5180, API proxy on :8787
 ```
 
-Space freezes the frame. Click to point (Shift+drag adds, Alt+drag subtracts), draw a loop to
-lasso, or draw a line to scribble. Hold V (or the mic button) and speak. U undoes, Esc deselects,
-F toggles fullscreen. "Hand mode" points with your index finger and pinches to press. "Live recolor"
-recolors what you point at on the moving video.
+Click anything on the live view to freeze and select it (Space also freezes). Shift+drag adds,
+Alt+drag subtracts, a loop lassos, a line scribbles. Then hold V (or the mic button) and speak, type
+the command, or tap a suggestion chip. U undoes, Esc deselects, hold B to compare with the original,
+S saves, F toggles fullscreen. Under "Settings & debug": video/voice source, "Hand mode" (point with
+your index finger, pinch to press), "Live recolor" (recolors what you point at on the moving video),
+AI mask and the segmentation readout.
 
 Debug pages: `/strokes-debug.html`, `/live-debug.html`, `/voice-debug.html`, `/face-debug.html`,
 `/glasses-debug.html`.

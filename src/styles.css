@@ -5,12 +5,19 @@
   --accent: #ff3ca0;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; }
+body { margin: 0; background: radial-gradient(1200px 500px at 50% -200px, #2a1030 0%, var(--bg) 70%) no-repeat, var(--bg); color: var(--fg); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; min-height: 100vh; }
 main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-h1 { margin: 0 0 12px; font-size: 1.4rem; letter-spacing: 0.02em; }
+.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 4px 0 14px; }
+h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.01em; }
+h1 em { font-style: normal; color: var(--accent); }
+.top p { margin: 0; opacity: 0.6; font-size: 14px; }
+kbd {
+  font: 600 10px/1 ui-monospace, monospace; padding: 2px 4px; margin-left: 4px; border-radius: 4px;
+  border: 1px solid #44445a; background: #0e0e14; opacity: 0.7; vertical-align: 1px;
+}
 
 .stage-wrap { display: flex; flex-direction: column; gap: 12px; }
-.stage { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; }
+.stage { position: relative; width: 100%; background: #000; border-radius: 14px; overflow: hidden; box-shadow: 0 10px 40px #0008, 0 0 0 1px #ffffff14; }
 /* Portrait frames (glasses relay, 360x640): fit the height instead of filling the width. */
 .stage.portrait { width: min(100%, calc(75vh * var(--ar))); margin: 0 auto; }
 .layer { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
@@ -25,36 +32,74 @@ h1 { margin: 0 0 12px; font-size: 1.4rem; letter-spacing: 0.02em; }
   background: #000b; color: #00e5ff; border: 1px solid #00e5ff88; border-radius: 6px;
 }
 .badge {
-  position: absolute; top: 10px; left: 10px; padding: 3px 8px; font-size: 12px;
-  font-weight: 700; background: #000a; border-radius: 6px; letter-spacing: 0.08em;
+  position: absolute; top: 10px; left: 10px; padding: 4px 9px; font-size: 11px;
+  font-weight: 700; background: #000a; border-radius: 999px; letter-spacing: 0.1em; backdrop-filter: blur(6px);
 }
+.badge.is-live::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%;
+  background: #ff3b3b; vertical-align: 1px; animation: blink 1.6s ease-in-out infinite;
+}
+.badge.is-original { background: #ffd21fcc; color: #000; }
+@keyframes blink { 50% { opacity: 0.3; } }
+/* What to do next, bottom center of the stage. */
+.coach {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 8px 16px;
+  font-size: 14px; font-weight: 600; background: #000b; border: 1px solid #ffffff22; border-radius: 999px;
+  white-space: nowrap; pointer-events: none; backdrop-filter: blur(6px);
+}
+.coach.busy { color: #00e5ff; }
+.mask-overlay { animation: breathe 2.2s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: 0.7; } }
 .error {
   position: absolute; inset: auto 12px 12px 12px; padding: 10px 12px; background: #5a1020;
   border-radius: 8px; font-size: 14px;
 }
 
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+/* Command bar: mic + text box; result line; one-tap chips. */
+.command { display: flex; gap: 8px; align-items: stretch; }
+.command-form { flex: 1; display: flex; gap: 8px; min-width: 0; }
+.command-form input {
+  flex: 1; min-width: 0; background: #111118; color: var(--fg); border: 1px solid #33334a;
+  border-radius: 10px; padding: 12px 14px; font-size: 16px;
+}
+.command-form input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px #ff3ca033; }
+.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; padding: 8px 18px; }
+.primary:hover:not(:disabled) { filter: brightness(1.1); }
+.mic { display: flex; align-items: center; gap: 8px; font-weight: 600; padding: 8px 16px; user-select: none; touch-action: none; }
+.mic-dot { width: 10px; height: 10px; border-radius: 50%; background: #777; }
+.mic.on { border-color: var(--accent); background: #3a1028; }
+.mic.on .mic-dot { background: var(--accent); box-shadow: 0 0 0 0 #ff3ca088; animation: ping 1s ease-out infinite; }
+@keyframes ping { to { box-shadow: 0 0 0 10px #ff3ca000; } }
+.result { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; min-height: 22px; font-size: 14px; padding: 0 2px; }
+.result-text { font-weight: 500; }
+.result-meta { font-size: 12px; opacity: 0.45; font-variant-numeric: tabular-nums; }
+.tone-idle .result-text { opacity: 0.6; }
+.tone-listening .result-text, .tone-working .result-text { color: #00e5ff; }
+.tone-ok .result-text { color: #6ee7a0; }
+.tone-warn .result-text { color: #ffb44d; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 999px; padding: 6px 12px; font-size: 13px; background: #15151d; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; padding-top: 4px; border-top: 1px solid #ffffff10; }
+.toolbar .group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding-top: 8px; }
+.settings { font-size: 13px; }
+.settings summary { cursor: pointer; opacity: 0.6; padding: 4px 0; user-select: none; }
+.settings summary:hover { opacity: 1; }
+.settings-body { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; margin-top: 6px; background: #111118; border: 1px solid #22222e; border-radius: 10px; }
+.settings-row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.settings-row.readout, .settings-row.keys { font-size: 12px; opacity: 0.6; font-variant-numeric: tabular-nums; }
 button, select {
   background: #1b1b24; color: var(--fg); border: 1px solid #33334a; border-radius: 8px;
   padding: 8px 12px; font-size: 14px; cursor: pointer;
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
-.readout { margin-left: auto; font-size: 13px; opacity: 0.7; font-variant-numeric: tabular-nums; }
 
 .badge-right { left: auto; right: 10px; font-weight: 500; opacity: 0.8; }
 .swatch { width: 26px; height: 26px; padding: 0; border-radius: 50%; border: 1px solid #0006; outline-offset: 2px; }
+.swatch.on { outline: 2px solid #fff; }
 .color { width: 36px; height: 34px; padding: 0; background: none; border: 1px solid #33334a; border-radius: 8px; cursor: pointer; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; opacity: 0.85; }
 
-.voice { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.mic { user-select: none; touch-action: none; }
-.mic.on { border-color: var(--accent); background: #3a1028; }
-.dev-cmd input {
-  width: 300px; max-width: 100%; background: #111118; color: var(--fg); border: 1px dashed #44445a;
-  border-radius: 8px; padding: 8px 10px; font-size: 14px;
-}
-.voice-status { font-size: 13px; opacity: 0.8; font-variant-numeric: tabular-nums; }
 .hand-cursor {
   display: none; position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
   border-radius: 50%; background: #00e5ff; box-shadow: 0 0 0 2px #000a, 0 0 12px #00e5ffaa;
@@ -89,6 +134,13 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 @media (prefers-reduced-motion: reduce) {
   .thinking { animation: none; opacity: 0.8; }
+  .mask-overlay, .badge.is-live::before, .mic.on .mic-dot { animation: none; }
+}
+@media (max-width: 640px) {
+  main { padding: 10px; }
+  .top p { display: none; }
+  .coach { font-size: 12px; bottom: 10px; }
+  .hint { display: none; }
 }
 .error { max-height: 40%; overflow: auto; overflow-wrap: anywhere; }
 
@@ -101,16 +153,16 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Cycling "what to say" hint, top center of the stage. */
 .hint {
-  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 3px 10px;
-  font-size: 12px; background: #000a; border-radius: 6px; white-space: nowrap; pointer-events: none;
-  opacity: 0.85;
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 4px 12px;
+  font-size: 12px; background: #000a; border-radius: 999px; white-space: nowrap; pointer-events: none;
+  opacity: 0.85; backdrop-filter: blur(6px);
 }
 .hint b { color: var(--accent); }
 
 /* F = fullscreen stage: only the stage and a thin status line. */
 .status-line { display: none; }
 .stage-wrap:fullscreen { background: #000; gap: 0; justify-content: center; }
-.stage-wrap:fullscreen .controls, .stage-wrap:fullscreen .voice { display: none; }
+.stage-wrap:fullscreen > :not(.stage, .status-line) { display: none; }
 .stage-wrap:fullscreen .stage { width: min(100vw, calc((100vh - 22px) * var(--ar, 1.7778))); margin: 0 auto; border-radius: 0; }
 .stage-wrap:fullscreen .status-line {
   display: block; height: 22px; padding: 3px 10px; font-size: 12px; opacity: 0.8;
