@@ -20,6 +20,10 @@
 //   ws(s)://<host>/glasses/display    relay -> web app: the latest scene (JSON then PNG), status and
 //                                     anchor, each only when it changed for that client; the web
 //                                     app's {"type":"ping",t} gets {"type":"pong",t,server}.
+// Hands-free control (glasses -> laptop):
+//   The phone sends text {"type":"transcript",text,final} (glasses mic, DAT Speech) on its socket; the
+//   web app sends {"type":"input",action:"select"|"undo"|"done"} (pinch on its buttons) on its socket.
+//   ws://<laptop-ip>:8788/glasses/events  relay -> laptop browser: both, as they arrive (src/input/glassesEvents.ts)
 //   GET /glasses/app/                 the built web app (npm run build:glasses), so one HTTPS tunnel
 //                                     to this port serves both the page and its socket.
 // Importing this module starts the server (server/proxy.ts imports it).
@@ -55,6 +59,12 @@ let status: Versioned<string> = { v: 0, value: JSON.stringify({ type: "status", 
 let anchor: Versioned<string | null> = { v: 0, value: null };
 type DisplayClient = { busy: boolean; dirty: boolean; scene: number; status: number; anchor: number };
 const displayClients = new Map<WebSocket, DisplayClient>();
+const eventClients = new Set<WebSocket>();
+
+/** Passes a glasses event (transcript or button) to every laptop browser listening. */
+function publishEvent(json: string) {
+  for (const ws of eventClients) if (ws.readyState === WebSocket.OPEN) ws.send(json);
+}
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../glasses-webapp/dist");
 const TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -316,12 +326,19 @@ wss.on("connection", (ws, req) => {
       try {
         const m = JSON.parse(toBuffer(data).toString());
         if (m.type === "ping") ws.send(JSON.stringify({ type: "pong", t: m.t, server: Date.now() }));
+        else if (m.type === "input" && typeof m.action === "string")
+          publishEvent(JSON.stringify({ type: "input", action: m.action, t: Date.now() }));
       } catch {
         // ignore
       }
     });
     ws.on("close", () => displayClients.delete(ws));
     sendToDisplay(ws, c);
+    return;
+  }
+  if (path === "/glasses/events") {
+    eventClients.add(ws);
+    ws.on("close", () => eventClients.delete(ws));
     return;
   }
   // Anything else is a phone sending frames (and receiving overlays on the same socket).
@@ -335,6 +352,11 @@ wss.on("connection", (ws, req) => {
     if (!isBinary) {
       try {
         const meta = JSON.parse(toBuffer(data).toString());
+        if (meta.type === "transcript") {
+          if (typeof meta.text === "string")
+            publishEvent(JSON.stringify({ type: "transcript", text: meta.text, final: !!meta.final, t: Date.now() }));
+          return;
+        }
         tPhone = typeof meta.t === "number" ? meta.t : null;
         if (typeof meta.fps === "number") phoneFps = meta.fps;
       } catch {

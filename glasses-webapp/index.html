@@ -11,10 +11,10 @@
       html, body { margin: 0; width: 600px; height: 600px; overflow: hidden; background: #000; color: #fff;
         font-family: system-ui, sans-serif; }
       #view { position: absolute; inset: 0; width: 600px; height: 600px; }
-      #controls { position: absolute; top: 24px; left: 0; right: 0; display: flex; gap: 12px; justify-content: center;
+      #controls { position: absolute; top: 24px; left: 0; right: 0; display: flex; gap: 8px; justify-content: center;
         transition: opacity 0.3s; }
       #controls.faded { opacity: 0; }
-      button { min-height: 64px; padding: 0 24px; border-radius: 32px; border: 2px solid transparent; font: 600 18px system-ui, sans-serif;
+      button { min-height: 64px; padding: 0 16px; border-radius: 32px; border: 2px solid transparent; font: 600 18px system-ui, sans-serif;
         color: #fff; background: #1c1e21; }
       button:focus { outline: none; border-color: #fff; }
       button:disabled { color: #b0b3b8; }
@@ -29,6 +29,9 @@
     <canvas id="view" width="600" height="600"></canvas>
     <div id="controls">
       <button id="start">Start</button>
+      <button id="select" hidden>Select</button>
+      <button id="undo" hidden>Undo</button>
+      <button id="done" hidden>Done</button>
       <button id="calibrate" hidden>Calibrate</button>
       <button id="info" hidden>Info</button>
     </div>

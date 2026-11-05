@@ -1,6 +1,7 @@
 // Tests the glasses web app (glasses-webapp/) in headless Chromium against a real relay, standing in
 // for the laptop (scene/anchor/status messages) and for the glasses' gyro (DeviceMotionEvents):
-// head turns move the overlay the right way, anchors re-base it, and Calibrate learns new head axes.
+// head turns move the overlay the right way, anchors re-base it, Select reaches the laptop, and
+// Calibrate learns new head axes.
 // Usage: npm run build:glasses && npm run test:glasses
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
@@ -115,6 +116,16 @@ try {
   laptop.send(JSON.stringify({ type: "status", text: "made it pink" }));
   await sleep(200);
   check("status shows", (await page.locator("#status").innerText()) === "made it pink");
+
+  // A pinch with Select focused (the default after Start) reaches the laptop, even with the controls faded.
+  const events = new WebSocket(`ws://127.0.0.1:${PORT}/glasses/events`);
+  await new Promise((r) => events.on("open", r));
+  const got = [];
+  events.on("message", (d) => got.push(JSON.parse(String(d))));
+  await page.keyboard.press("Enter");
+  await sleep(300);
+  check("pinch on Select reaches the laptop", got.some((e) => e.type === "input" && e.action === "select"), JSON.stringify(got));
+  events.close();
 
   // Calibrate with glasses whose "turn left" is device +z and "look up" is device -y.
   await page.keyboard.press("ArrowRight"); // D-pad: wake the controls (faded after 6 s)

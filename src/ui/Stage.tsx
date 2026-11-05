@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listCameras, startCamera, stopCamera } from "../input/camera";
 import { glassesFrameTimes, startGlassesSource, stopGlassesSource } from "../input/glassesSource";
 import { ObjectTracker, overlayBox } from "../vision/track";
+import { listenGlassesEvents, type GlassesEvent } from "../input/glassesEvents";
 import { FrameHistory } from "../commands/history";
 import { initSegmenter } from "../vision/segmenter";
 import { initFace } from "../vision/face";
@@ -30,6 +31,8 @@ import {
 } from "../edit/glassesOverlay";
 
 const CROSSFADE_MS = 400;
+/** After a glasses Select pinch, how long the next thing said on the glasses mic counts as a command. */
+const GLASSES_LISTEN_MS = 10_000;
 import { speechSupported } from "../input/speech";
 import { createPushToTalk, MusePushToTalk, voiceSupported, type PushToTalkLike, type VoiceEngine } from "../input/museVoice";
 import { AIM_AHEAD, BETA, HandTracker, MIN_CUTOFF, handTuning } from "../input/handTracker";
@@ -930,6 +933,78 @@ export default function Stage() {
     startTalking();
   }, [handMode, freeze, runSegment, startTalking]);
 
+  // Hands-free from the glasses: web app buttons (pinch) and the glasses mic (DAT Speech on the phone).
+  // Select = freeze if live and point at the fingertip (hand mode) or straight ahead (the display
+  // window's center), then listen: the next final transcript within GLASSES_LISTEN_MS is a command.
+  // "Always listen" treats every final transcript as one (freezing and pointing ahead if live).
+  const [glassesAlwaysListen, setGlassesAlwaysListen] = useState(false);
+  const listenUntilRef = useRef(0);
+  const listenTimerRef = useRef(0);
+  const glassesAim = useCallback(() => {
+    const live = !historyRef.current.current;
+    if (live) freeze();
+    const s = handMode ? pointer.latest("finger") : null;
+    const video = videoRef.current;
+    let aim = s?.handPresent ? { x: s.x, y: s.y } : null;
+    if (!aim && live && video?.videoWidth) {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      aim = glassesView.mode === "aligned" ? { x: glassesView.cx * w, y: glassesView.cy * h } : { x: w / 2, y: h / 2 };
+      aim = { x: Math.round(Math.min(w - 1, Math.max(0, aim.x))), y: Math.round(Math.min(h - 1, Math.max(0, aim.y))) };
+    }
+    if (aim) {
+      setPoint(aim);
+      void runSegment(aim);
+    }
+  }, [handMode, freeze, runSegment, glassesView]);
+  const glassesListen = useCallback(() => {
+    listenUntilRef.current = Date.now() + GLASSES_LISTEN_MS;
+    setVoiceStatus("listening...");
+    clearTimeout(listenTimerRef.current);
+    listenTimerRef.current = window.setTimeout(() => {
+      listenUntilRef.current = 0;
+      setVoiceStatus((v) => (v.startsWith("listening") ? "" : v));
+    }, GLASSES_LISTEN_MS);
+  }, []);
+  const onGlassesEvent = useCallback(
+    (e: GlassesEvent) => {
+      if (e.type === "input") {
+        if (e.action === "select") {
+          glassesAim();
+          glassesListen();
+        } else if (e.action === "undo") {
+          undo();
+          setVoiceStatus("undone");
+        } else {
+          listenUntilRef.current = 0;
+          clearTimeout(listenTimerRef.current);
+          resume();
+          setVoiceStatus("");
+        }
+        return;
+      }
+      const listening = listenUntilRef.current > Date.now();
+      if (!listening && !glassesAlwaysListen) return;
+      const text = e.text.trim();
+      if (!e.final) {
+        if (text) setVoiceStatus(`listening... "${text}"`);
+        return;
+      }
+      if (!text) return;
+      listenUntilRef.current = 0;
+      clearTimeout(listenTimerRef.current);
+      if (!historyRef.current.current) glassesAim();
+      void runCommand(text, new Timeline("glasses", "transcript"), "glasses");
+    },
+    [glassesAim, glassesListen, undo, resume, runCommand, glassesAlwaysListen],
+  );
+  const onGlassesEventRef = useRef(onGlassesEvent);
+  onGlassesEventRef.current = onGlassesEvent;
+  useEffect(() => {
+    if (source !== "glasses") return;
+    return listenGlassesEvents((e) => onGlassesEventRef.current(e));
+  }, [source]);
+
   // Live recolor on the unfrozen view: recolors whatever the finger (or the hovering mouse) points
   // at, in the current color. Runs only while live; freezing or resuming tears it down.
   const liveRef = useRef<LiveRecolor | null>(null);
@@ -1179,7 +1254,11 @@ export default function Stage() {
       original: frozen ? h.original : null,
       current: frozen ? h.current : null,
       alpha: frozen ? alpha : null,
-      status: voiceStatus === "hold V to talk" ? "" : voiceStatus, // the idle hint is for the laptop
+      // Short for the glasses: no laptop idle hint, recognizer tag or timings.
+      status:
+        voiceStatus === "hold V to talk"
+          ? ""
+          : voiceStatus.replace(/^\[[^\]]*\]\s*/, "").replace(/\s·\s[^·]*\d+ms$/, ""),
       view: glassesView,
       test: glassesTest,
       tCapture: frozen ? freezeTimeRef.current : null,
@@ -1505,6 +1584,12 @@ export default function Stage() {
           </label>
         )}
         {overlayOn && trackInfo && <span className="readout">{trackInfo}</span>}
+        {source === "glasses" && (
+          <label className="check" title="Run everything said on the glasses mic as a command, without pinching Select first">
+            <input type="checkbox" checked={glassesAlwaysListen} onChange={(e) => setGlassesAlwaysListen(e.target.checked)} />
+            Always listen
+          </label>
+        )}
         {source === "webcam" && cameras.length > 1 && (
           <select value={deviceId ?? ""} onChange={(e) => setDeviceId(e.target.value || undefined)}>
             <option value="">Default camera</option>

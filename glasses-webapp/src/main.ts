@@ -4,6 +4,9 @@
 //   scene  {id, t, image} + PNG  the overlay for a frozen frame and when that frame was captured
 //   anchor {id, dx, dy, t}       where the laptop's tracker found the object in a later frame
 //   status {text}                the voice/edit status, drawn head-locked
+// and gets {"type":"input",action} back when a button is pinched: Select (freeze if live, point
+// straight ahead or at the fingertip, and listen for a command on the glasses mic), Undo, Done
+// (back to live). Select stays focused, so a pinch is enough; a swipe brings the other buttons up.
 // Between those, the head's rotation since the frame's capture time (gyro) shifts and rolls the
 // overlay: turning left moves the world right by ppd px per degree, looking up moves it down.
 //
@@ -26,6 +29,9 @@ const statusEl = document.getElementById("status")!;
 const hudEl = document.getElementById("hud")!;
 const controls = document.getElementById("controls")!;
 const startBtn = document.getElementById("start") as HTMLButtonElement;
+const selectBtn = document.getElementById("select") as HTMLButtonElement;
+const undoBtn = document.getElementById("undo") as HTMLButtonElement;
+const doneBtn = document.getElementById("done") as HTMLButtonElement;
 const calibrateBtn = document.getElementById("calibrate") as HTMLButtonElement;
 const infoBtn = document.getElementById("info") as HTMLButtonElement;
 
@@ -51,12 +57,14 @@ let scene: Scene = { id: 0, t: null, img: null };
 let anchor: { dx: number; dy: number; t: number } | null = null;
 let pendingScene: { id: number; t: number | null } | null = null; // waiting for its PNG
 let connected = false;
+let socket: WebSocket | null = null;
 // Relay clock minus local clock (ms), from the ping with the shortest round trip.
 let clockOffset = 0;
 let bestRtt = Infinity;
 
 function connect() {
   const ws = new WebSocket(RELAY_URL);
+  socket = ws;
   ws.binaryType = "blob";
   let pinger = 0;
   ws.onopen = () => {
@@ -174,7 +182,9 @@ function showControls() {
   hideTimer = window.setTimeout(() => controls.classList.add("faded"), 6000);
 }
 function guard(e: Event) {
-  if (!controls.classList.contains("faded")) {
+  // Select works even while the controls are faded: it's the one thing a pinch should always do.
+  const pinchOnSelect = document.activeElement === selectBtn && (e.type === "click" || (e as KeyboardEvent).key === "Enter");
+  if (!controls.classList.contains("faded") || pinchOnSelect) {
     showControls();
     return;
   }
@@ -199,10 +209,24 @@ startBtn.addEventListener("click", async () => {
   await requestSensors();
   pose.start();
   startBtn.hidden = true;
-  calibrateBtn.hidden = false;
-  infoBtn.hidden = false;
-  calibrateBtn.focus();
+  for (const b of [selectBtn, undoBtn, doneBtn, calibrateBtn, infoBtn]) b.hidden = false;
+  selectBtn.focus();
   showControls();
+});
+
+function sendInput(action: "select" | "undo" | "done") {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    statusEl.hidden = false;
+    statusEl.textContent = "Not connected to the laptop";
+    return;
+  }
+  socket.send(JSON.stringify({ type: "input", action }));
+}
+selectBtn.addEventListener("click", () => sendInput("select"));
+undoBtn.addEventListener("click", () => sendInput("undo"));
+doneBtn.addEventListener("click", () => {
+  sendInput("done");
+  selectBtn.focus(); // back to the main action
 });
 
 infoBtn.addEventListener("click", () => {
