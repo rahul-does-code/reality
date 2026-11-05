@@ -35,9 +35,16 @@ relay /glasses/display --wss--> this app on the glasses --> 600x600 canvas, redr
 4. Keep the phone relay app streaming the camera (`ios/`). Leave its "Ray-Ban Display" toggle **off**:
    this app draws the display instead.
 5. In the laptop web app: Source = Glasses relay, Display = Aligned window (see below).
-6. On the glasses, open the app and pinch **Start**. Pinch **Info** for a readout (connection, fps,
-   head sensor rate, clock offset, current shift). The buttons fade after 6 s; swipe or pinch once to
-   bring them back (that first input only wakes them).
+6. On the glasses, open the app and pinch **Start**. Then, hands-free:
+   - **Select** (focused, so just pinch): freezes if live, points at your fingertip (laptop in Hand
+     mode) or else straight ahead (the middle of the display window), and listens. Say the command
+     ("make it pink", "only the top half", "turn it into a cardboard box") within 10 s. Voice comes
+     from the glasses mic through the phone app's **Glasses mic** toggle ([ios/README.md](../ios/README.md#7-voice-commands-from-the-glasses-mic)).
+     Pinch Select again for another command on the same frame.
+   - **Undo**: undoes the last edit. **Done**: back to live.
+   - **Info**: a readout (connection, fps, head sensor rate, clock offset, current shift).
+   The buttons fade after 6 s. A pinch on Select still works then; swipe once to bring the others
+   back (that first swipe only wakes them).
 
 ## Calibrate
 

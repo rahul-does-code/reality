@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
   @ObservedObject var model: RelayModel
+  @State private var sayText = ""
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -18,6 +19,8 @@ struct ContentView: View {
           .disabled(model.running)
       }
       Toggle("Ray-Ban Display (show edits on the glasses)", isOn: $model.useDisplay)
+        .disabled(model.running)
+      Toggle("Glasses mic (voice commands)", isOn: $model.useSpeech)
         .disabled(model.running)
       Text("Sends to ws://\(model.laptopIP.isEmpty ? "<laptop-ip>" : model.laptopIP):8788")
         .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -40,6 +43,16 @@ struct ContentView: View {
       if model.useDisplay && model.running {
         Text("\(model.displayStatus) · overlays shown: \(model.overlaysShown)")
           .font(.callout.monospacedDigit())
+      }
+      if model.useSpeech && model.running {
+        Text("\(model.speechStatus) \(model.lastTranscript)").font(.callout)
+        Toggle("Mock speech from the phone mic", isOn: $model.mockSpeechFromPhoneMic).font(.callout)
+        HStack {
+          TextField("or type what you'd say", text: $sayText)
+            .textFieldStyle(.roundedBorder)
+            .onSubmit(say)
+          Button("Say", action: say).disabled(sayText.isEmpty)
+        }
       }
       if let preview = model.displayPreview {
         // What the mock glasses display shows (black = see-through on real glasses).
@@ -65,6 +78,11 @@ struct ContentView: View {
       // Launch arguments "-laptopIP 127.0.0.1 -autostart YES" start streaming without tapping (simulator tests).
       if UserDefaults.standard.bool(forKey: "autostart") { await model.start() }
     }
+  }
+
+  private func say() {
+    model.simulateSpeech(sayText)
+    sayText = ""
   }
 
   private func hideKeyboard() {

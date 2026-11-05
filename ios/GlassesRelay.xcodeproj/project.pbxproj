@@ -11,6 +11,7 @@
 		A1000000000000000000B002 /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000C002 /* MWDATCamera */; };
 		A1000000000000000000B003 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000C003 /* MWDATMockDevice */; };
 		A1000000000000000000B004 /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000C004 /* MWDATDisplay */; };
+		A1000000000000000000B005 /* MWDATSpeech in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000C005 /* MWDATSpeech */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 				A1000000000000000000B002 /* MWDATCamera in Frameworks */,
 				A1000000000000000000B003 /* MWDATMockDevice in Frameworks */,
 				A1000000000000000000B004 /* MWDATDisplay in Frameworks */,
+				A1000000000000000000B005 /* MWDATSpeech in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -82,6 +84,7 @@
 				A1000000000000000000C002 /* MWDATCamera */,
 				A1000000000000000000C003 /* MWDATMockDevice */,
 				A1000000000000000000C004 /* MWDATDisplay */,
+				A1000000000000000000C005 /* MWDATSpeech */,
 			);
 			productName = GlassesRelay;
 			productReference = A1000000000000000000A001 /* GlassesRelay.app */;
@@ -200,6 +203,8 @@
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Needed to connect to Meta AI glasses.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "The mock glasses use the phone's back camera as their camera feed.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Sends the glasses camera frames to your laptop on this Wi-Fi network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hears your voice commands (the glasses mic; the phone mic for the mock glasses).";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Turns your voice commands into text for the mock glasses.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
@@ -228,6 +233,8 @@
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Needed to connect to Meta AI glasses.";
 				INFOPLIST_KEY_NSCameraUsageDescription = "The mock glasses use the phone's back camera as their camera feed.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Sends the glasses camera frames to your laptop on this Wi-Fi network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Hears your voice commands (the glasses mic; the phone mic for the mock glasses).";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Turns your voice commands into text for the mock glasses.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
@@ -298,6 +305,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1000000000000000000C000 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATDisplay;
+		};
+		A1000000000000000000C005 /* MWDATSpeech */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1000000000000000000C000 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATSpeech;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

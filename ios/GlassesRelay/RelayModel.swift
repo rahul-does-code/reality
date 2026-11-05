@@ -4,12 +4,15 @@
 // With "Ray-Ban Display" on, the mock is a Meta Ray-Ban Display and the session also gets a Display:
 // overlays coming back from the laptop on the same socket go onto it (GlassesDisplay), and the mock's
 // display preview shows on the phone.
+// With "Glasses mic" on, the session also gets Speech, and transcripts go to the laptop on the same
+// socket (voice commands). The mock's speech comes from the phone's own recognizer, or typed text.
 // Real glasses would skip the MockDeviceKit block and need Meta AI app registration instead.
 
 import AVFoundation
 import MWDATCamera
 import MWDATCore
 import MWDATMockDevice
+import MWDATSpeech
 import SwiftUI
 
 @MainActor
@@ -30,6 +33,15 @@ final class RelayModel: ObservableObject {
   @Published var overlaysShown = 0
   /// The mock glasses' display, rendered on the phone (mock only).
   @Published var displayPreview: UIView?
+  @Published var useSpeech: Bool = UserDefaults.standard.bool(forKey: "useSpeech") {
+    didSet { UserDefaults.standard.set(useSpeech, forKey: "useSpeech") }
+  }
+  /// Mock only: the mock's transcripts come from the phone's recognizer (true) or typed text (false).
+  @Published var mockSpeechFromPhoneMic = true {
+    didSet { glasses?.services.speech.setTranscriptionSource(mockSpeechFromPhoneMic ? .liveDeviceAsr : .injected) }
+  }
+  @Published var speechStatus = ""
+  @Published var lastTranscript = ""
 
   private let wearables = Wearables.shared
   private var glasses: (any MockGlasses)?
@@ -38,6 +50,7 @@ final class RelayModel: ObservableObject {
   private let tokens = ListenerTokenBag()
   private var sender: FrameSender?
   private var glassesDisplay: GlassesDisplay?
+  private var glassesSpeech: GlassesSpeech?
   private var statsTimer: Timer?
 
   func start() async {
@@ -74,6 +87,7 @@ final class RelayModel: ObservableObject {
       device.unfold()
       device.don()
       if useDisplay { displayPreview = device.services.display.createPreviewView() }
+      if useSpeech { device.services.speech.setTranscriptionSource(mockSpeechFromPhoneMic ? .liveDeviceAsr : .injected) }
 
       // 2. Wait until the toolkit reports the (mock) device as available.
       status = "Waiting for device..."
@@ -144,6 +158,35 @@ final class RelayModel: ObservableObject {
         }
       }
 
+      // 6. Speech (glasses mic): transcripts -> the laptop. A failure leaves the rest running.
+      if useSpeech {
+        do {
+          if try await wearables.checkPermissionStatus(.microphone) != .granted,
+            try await wearables.requestPermission(.microphone) != .granted
+          {
+            speechStatus = "Microphone permission denied"
+          } else if let glassesSpeech = try GlassesSpeech.attach(to: session, tokens: tokens) {
+            glassesSpeech.onTranscript = { [weak self, weak sender] text, isFinal in
+              let message: [String: Any] = ["type": "transcript", "text": text, "final": isFinal]
+              guard let data = try? JSONSerialization.data(withJSONObject: message),
+                let json = String(data: data, encoding: .utf8)
+              else { return }
+              sender?.sendText(json)
+              Task { @MainActor in self?.lastTranscript = isFinal ? "“\(text)”" : "\(text)…" }
+            }
+            glassesSpeech.onStatus = { [weak self] text in
+              Task { @MainActor in self?.speechStatus = text }
+            }
+            self.glassesSpeech = glassesSpeech
+            glassesSpeech.start()
+          } else {
+            speechStatus = "These glasses have no on-device speech"
+          }
+        } catch {
+          speechStatus = "Speech failed: \(error.localizedDescription)"
+        }
+      }
+
       statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
         Task { @MainActor in
           guard let self, let sender = self.sender else { return }
@@ -164,6 +207,10 @@ final class RelayModel: ObservableObject {
     statsTimer?.invalidate()
     statsTimer = nil
     tokens.clear()
+    glassesSpeech?.stop()
+    glassesSpeech = nil
+    speechStatus = ""
+    lastTranscript = ""
     glassesDisplay?.stop()
     glassesDisplay = nil
     displayPreview = nil
@@ -184,6 +231,13 @@ final class RelayModel: ObservableObject {
     sentFPS = 0
     datFPS = 0
     if !keepStatus { status = "Stopped" }
+  }
+
+  /// Mock only: as if the wearer said `text` (sent as a final transcript).
+  func simulateSpeech(_ text: String) {
+    guard let glasses, !text.isEmpty else { return }
+    if mockSpeechFromPhoneMic { mockSpeechFromPhoneMic = false }
+    glasses.services.speech.simulateTranscription(text: text, isFinal: true, confidence: 1)
   }
 
   private static func waitForDevice(_ selector: AutoDeviceSelector, seconds: Double) async -> Bool {

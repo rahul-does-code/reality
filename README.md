@@ -62,7 +62,9 @@ toolkit's Display capability (mock display preview on the phone until real glass
 [ios/README.md](ios/README.md#6-show-the-edits-on-the-glasses-meta-ray-ban-display). To keep the overlay
 on the object as you move, run the glasses web app instead: it draws on the glasses, shifts the overlay
 with the glasses' gyro and re-anchors it from the laptop's object tracker. See
-[glasses-webapp/README.md](glasses-webapp/README.md).
+[glasses-webapp/README.md](glasses-webapp/README.md). Hands-free: pinch **Select** in the glasses web app
+to freeze and point straight ahead (or at your fingertip in Hand mode), then say the command into the
+glasses mic (the phone app's "Glasses mic" toggle); **Undo** and **Done** are pinches too.
 
 ## Architecture
 

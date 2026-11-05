@@ -102,6 +102,20 @@ The glasses web app ([../glasses-webapp/README.md](../glasses-webapp/README.md))
 limits: it runs on the glasses, redraws every frame and moves the overlay with the head. When using it,
 leave the toggle above off; this app then only streams the camera.
 
+## 7. Voice commands from the glasses mic
+
+Turn on **Glasses mic** before Start. The session also gets DAT's Speech capability (on-device
+transcription on the glasses, experimental in the toolkit), and every partial and final transcript goes
+to the laptop on the relay socket as `{"type":"transcript","text","final"}`. The laptop runs a final
+transcript as a command only right after a **Select** pinch in the glasses web app (for 10 s), or every
+time with **Always listen** ticked on the laptop, so ordinary conversation doesn't edit anything.
+
+With the mock glasses there's no glasses mic, so the app offers two stand-ins: **Mock speech from the
+phone mic** (the toolkit's mock hears the room through the phone's own recognizer; allow Microphone and
+Speech Recognition), or turn that off and type into **Say** (sent as a final transcript).
+
+The recognizer can stop by itself; the app starts it again after a second, up to 5 times in a row.
+
 ## Try it without the iPhone (iOS Simulator)
 
 Pick **iPhone 17 Pro** (any simulator) in the device menu, press Run, type `127.0.0.1` as the IP and tap
@@ -131,6 +145,7 @@ xcrun simctl launch --terminate-running-process booted com.CHANGEME.glassesrelay
 - `GlassesRelay/FrameSender.swift`: frame -> 640px JPEG -> WebSocket, drops frames instead of lagging;
   also receives the overlays the relay sends back
 - `GlassesRelay/GlassesDisplay.swift`: DAT Display capability, overlay PNG -> glasses display (latest wins)
+- `GlassesRelay/GlassesSpeech.swift`: DAT Speech capability, transcripts -> the relay (restarts when it stops)
 - `GlassesRelay/ContentView.swift`, `GlassesRelayApp.swift`: UI and `Wearables.configure()`
 - `GlassesRelay-Info.plist`: `MWDAT` keys (empty MetaAppID/ClientToken is fine for the mock), permissions
 - `GlassesRelay/mock-feed.mp4`: HEVC test clip for the simulator (made with ffmpeg `testsrc2`)

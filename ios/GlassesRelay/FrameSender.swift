@@ -52,6 +52,14 @@ final class FrameSender: @unchecked Sendable {
     return result
   }
 
+  /// Sends a text message (a transcript) on the relay socket; dropped if it isn't connected.
+  func sendText(_ text: String) {
+    lock.lock()
+    let t = stopped ? nil : task
+    lock.unlock()
+    t?.send(.string(text)) { _ in }
+  }
+
   func stop() {
     lock.lock()
     stopped = true
